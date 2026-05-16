@@ -1,10 +1,18 @@
+// BiblioVault books router — Catalog browse, author submission/draft/edit,
+// librarian approval/rejection, two-phase deletion, file download/preview,
+// and quick review. Borrow, bookmark, highlight, and borrow-records endpoints
+// are added by SA-4b (see placeholder comments below).
+//
+// All routes require authenticate unless noted.
+// Role restrictions use the authorize() factory.
+
 import { Router } from 'express';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
-import { randomUUID } from 'crypto';
+import { v4 as uuidv4 } from 'uuid';
 import { fileURLToPath } from 'url';
-import db, { processAutoReturns, generateDueReminders } from '../database.js';
+import { getDb, processAutoReturns, generateDueReminders } from '../database.js';
 import { authenticate, authorize } from '../middleware/auth.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -12,1617 +20,1690 @@ const __dirname = path.dirname(__filename);
 
 const router = Router();
 
-// =========================================================================
+// ---------------------------------------------------------------------------
 // Constants
-// =========================================================================
+// ---------------------------------------------------------------------------
 const BORROW_LIMIT = 5;
-const BOOKS_UPLOAD_DIR = path.join(__dirname, '..', 'uploads', 'books');
-const COVERS_UPLOAD_DIR = path.join(__dirname, '..', 'uploads', 'covers');
-const BOOK_MAX_SIZE = 50 * 1024 * 1024;         // 50 MB
-const COVER_MAX_SIZE = 2 * 1024 * 1024;           // 2 MB
-const ALLOWED_BOOK_MIMES = [
-  'application/pdf',
-  'text/plain',
-  'application/msword',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-];
-const ALLOWED_COVER_MIMES = ['image/jpeg', 'image/png'];
+const UPLOADS_DIR = path.join(__dirname, '..', 'uploads');
+const BOOKS_DIR = path.join(UPLOADS_DIR, 'books');
+const COVERS_DIR = path.join(UPLOADS_DIR, 'covers');
 
-// =========================================================================
-// Multer configuration
-// =========================================================================
+// Ensure upload directories exist
+[BOOKS_DIR, COVERS_DIR].forEach((dir) => {
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Multer storage configuration
+// ---------------------------------------------------------------------------
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    if (file.fieldname === 'cover_image') {
-      cb(null, COVERS_UPLOAD_DIR);
-    } else {
-      cb(null, BOOKS_UPLOAD_DIR);
-    }
+  destination(req, file, cb) {
+    cb(null, file.fieldname === 'cover_image' ? COVERS_DIR : BOOKS_DIR);
   },
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname) || '';
-    const name = `${randomUUID()}${ext}`;
-    cb(null, name);
-  }
+  filename(req, file, cb) {
+    const ext = path.extname(file.originalname);
+    cb(null, `${uuidv4()}${ext}`);
+  },
 });
 
-const upload = multer({
+// File filter for book uploads (field 'file')
+function bookFileFilter(req, file, cb) {
+  if (file.fieldname !== 'file') return cb(null, true);
+  const allowed = [
+    'application/pdf',
+    'text/plain',
+    'application/msword',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  ];
+  if (allowed.includes(file.mimetype)) return cb(null, true);
+  return cb(
+    new Error('Invalid file type. Only PDF, TXT, DOC, DOCX allowed for book files.')
+  );
+}
+
+// File filter for cover image uploads (field 'cover_image')
+function coverFileFilter(req, file, cb) {
+  if (file.fieldname !== 'cover_image') return cb(null, true);
+  const allowed = ['image/jpeg', 'image/png'];
+  if (allowed.includes(file.mimetype)) return cb(null, true);
+  return cb(
+    new Error('Invalid file type. Only JPG, PNG allowed for cover images.')
+  );
+}
+
+// Two multer instances as required by spec
+const uploadBook = multer({
   storage,
-  limits: { fileSize: BOOK_MAX_SIZE },
-  fileFilter: (req, file, cb) => {
-    const isBook = ALLOWED_BOOK_MIMES.includes(file.mimetype);
-    const isCover = ALLOWED_COVER_MIMES.includes(file.mimetype);
-    if (isBook || isCover) return cb(null, true);
-    cb(new Error('Invalid file type. Books: PDF/TXT/DOC/DOCX. Covers: JPG/PNG.'));
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50 MB
+  fileFilter: bookFileFilter,
+});
+const uploadCover = multer({
+  storage,
+  limits: { fileSize: 2 * 1024 * 1024 }, // 2 MB
+  fileFilter: coverFileFilter,
+});
+
+/**
+ * Combined multer middleware for multi-field forms (submit, draft, edit).
+ * Processes book file first, then cover image. Each field is optional.
+ */
+function multiUpload(req, res, next) {
+  uploadBook.fields([
+    { name: 'file', maxCount: 1 },
+    { name: 'cover_image', maxCount: 1 },
+  ])(req, res, (err) => {
+    if (err) return next(err);
+    next();
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Helper: resolveFilePath
+// Accepts a stored file path (may be absolute from a different layout) and
+// falls back to path.basename lookup inside uploads/books/.
+// ---------------------------------------------------------------------------
+function resolveFilePath(storedPath) {
+  if (!storedPath) return null;
+  if (fs.existsSync(storedPath)) return storedPath;
+  const basename = path.basename(storedPath);
+  const fallback = path.join(BOOKS_DIR, basename);
+  if (fs.existsSync(fallback)) return fallback;
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Helper: notification creation
+// ---------------------------------------------------------------------------
+function createNotification(db, userId, type, title, message, priority, category, relatedId) {
+  if (!userId) return;
+  const id = uuidv4();
+  db.prepare(
+    `INSERT INTO notifications (id, user_id, type, title, message, priority, category, related_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(id, userId, type, title, message, priority || 'normal', category || 'general', relatedId || null);
+  return id;
+}
+
+// ---------------------------------------------------------------------------
+// Helper: notify all librarians
+// ---------------------------------------------------------------------------
+function notifyLibrarians(db, type, title, message, relatedId) {
+  const librarians = db
+    .prepare("SELECT id FROM users WHERE role = 'librarian'")
+    .all();
+  for (const lib of librarians) {
+    createNotification(
+      db,
+      lib.id,
+      type,
+      title,
+      message,
+      'normal',
+      'submissions',
+      relatedId
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Helper: cascade-delete a book (for approve-delete)
+// Order: bookmarks -> highlights -> reading_progress -> book_versions ->
+//        downloaded_books -> review_replies -> reviews -> notifications ->
+//        borrow_records -> books
+// ---------------------------------------------------------------------------
+function cascadeDeleteBook(db, bookId) {
+  const run = db.transaction(() => {
+    db.prepare('DELETE FROM bookmarks WHERE book_id = ?').run(bookId);
+    db.prepare('DELETE FROM highlights WHERE book_id = ?').run(bookId);
+    db.prepare('DELETE FROM reading_progress WHERE book_id = ?').run(bookId);
+    db.prepare('DELETE FROM book_versions WHERE book_id = ?').run(bookId);
+    db.prepare('DELETE FROM downloaded_books WHERE book_id = ?').run(bookId);
+
+    // Delete review replies for reviews of this book
+    const reviewIds = db
+      .prepare('SELECT id FROM reviews WHERE book_id = ?')
+      .all(bookId);
+    for (const rev of reviewIds) {
+      db.prepare('DELETE FROM review_replies WHERE review_id = ?').run(rev.id);
+    }
+    db.prepare('DELETE FROM reviews WHERE book_id = ?').run(bookId);
+
+    // Delete related notifications (all types referencing this book)
+    db.prepare('DELETE FROM notifications WHERE related_id = ?').run(bookId);
+
+    db.prepare('DELETE FROM borrow_records WHERE book_id = ?').run(bookId);
+    db.prepare('DELETE FROM books WHERE id = ?').run(bookId);
+  });
+  run();
+}
+
+// ---------------------------------------------------------------------------
+// Helper: delete book files from disk
+// ---------------------------------------------------------------------------
+function deleteBookFiles(book) {
+  if (book.file_path && fs.existsSync(book.file_path)) {
+    try { fs.unlinkSync(book.file_path); } catch (e) { /* ignore */ }
+  }
+  if (book.cover_image) {
+    const coverPath = path.join(UPLOADS_DIR, book.cover_image);
+    if (fs.existsSync(coverPath)) {
+      try { fs.unlinkSync(coverPath); } catch (e) { /* ignore */ }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Helper: compute relative cover path for storage
+// ---------------------------------------------------------------------------
+function coverRelPath(filename) {
+  return `uploads/covers/${filename}`;
+}
+
+// ---------------------------------------------------------------------------
+// HELPERS END ---------------------------------------------------------------
+// ===========================================================================
+// ROUTES BEGIN
+// ===========================================================================
+//
+// IMPORTANT: All static-path routes (no :id parameter) must be registered
+// BEFORE parameterized /:id routes, to prevent Express from capturing
+// literal path segments (e.g. "pending", "genres") as the :id parameter.
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// BROWSE & DISCOVERY — static paths only
+// ---------------------------------------------------------------------------
+
+/**
+ * GET /api/books
+ * Public book list (approved only). Supports search, genre filter, pagination.
+ * Calls processAutoReturns() lazily per DR-15.
+ */
+router.get('/', authenticate, (req, res) => {
+  try { processAutoReturns(); } catch (e) { /* non-critical */ }
+
+  const db = getDb();
+  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
+  const offset = (page - 1) * limit;
+  const search = (req.query.search || '').trim();
+  const genre = (req.query.genre || '').trim();
+
+  const books = db
+    .prepare(
+      `SELECT
+         b.id, b.title, b.author_name, b.genre, b.description,
+         b.cover_image, b.status, b.availability, b.publish_date,
+         b.submitted_date, b.times_borrowed,
+         COALESCE(AVG(r.rating), 0) AS average_rating,
+         COUNT(DISTINCT r.id) AS review_count
+       FROM books b
+       LEFT JOIN reviews r ON r.book_id = b.id AND (r.flagged = 0 OR r.flagged IS NULL)
+       WHERE b.status = 'approved'
+         AND (? = '' OR b.title LIKE '%' || ? || '%' OR b.author_name LIKE '%' || ? || '%')
+         AND (? = '' OR b.genre LIKE '%' || ? || '%')
+       GROUP BY b.id
+       ORDER BY b.publish_date DESC
+       LIMIT ? OFFSET ?`
+    )
+    .all(search, search, search, genre, genre, limit, offset);
+
+  // Convert average_rating to number
+  const result = books.map((b) => ({
+    ...b,
+    average_rating: Number(b.average_rating),
+    review_count: Number(b.review_count),
+  }));
+
+  res.json(result);
+});
+
+/**
+ * GET /api/books/genres
+ * Returns distinct genre values from approved books.
+ */
+router.get('/genres', authenticate, (req, res) => {
+  const db = getDb();
+  const rows = db
+    .prepare("SELECT DISTINCT genre FROM books WHERE status = 'approved' ORDER BY genre")
+    .all();
+  const genreSet = new Set();
+  for (const row of rows) {
+    for (const g of row.genre.split(',')) {
+      const trimmed = g.trim();
+      if (trimmed) genreSet.add(trimmed);
+    }
+  }
+  res.json(Array.from(genreSet).sort());
+});
+
+/**
+ * GET /api/books/recommendations
+ * Returns top 3 books by times_borrowed (popularity-based).
+ * Requires auth.
+ */
+router.get('/recommendations', authenticate, (req, res) => {
+  const db = getDb();
+  const books = db
+    .prepare(
+      `SELECT
+         b.id, b.title, b.author_name, b.genre, b.description,
+         b.cover_image, b.availability, b.times_borrowed, b.publish_date,
+         COALESCE(AVG(r.rating), 0) AS average_rating,
+         COUNT(DISTINCT r.id) AS review_count
+       FROM books b
+       LEFT JOIN reviews r ON r.book_id = b.id AND (r.flagged = 0 OR r.flagged IS NULL)
+       WHERE b.status = 'approved'
+       GROUP BY b.id
+       ORDER BY b.times_borrowed DESC
+       LIMIT 3`
+    )
+    .all();
+
+  res.json(
+    books.map((b) => ({
+      ...b,
+      average_rating: Number(b.average_rating),
+      review_count: Number(b.review_count),
+    }))
+  );
+});
+
+// ---------------------------------------------------------------------------
+// AUTHOR SUBMISSION FLOW — static paths
+// ---------------------------------------------------------------------------
+
+/**
+ * POST /api/books/submit
+ * Author only. Submits a new book with status='pending'.
+ * Multipart: file (required), cover_image (optional), and form fields.
+ */
+router.post('/submit', authenticate, authorize('author'), multiUpload, (req, res) => {
+  const db = getDb();
+
+  const { title, author_name, genre, description } = req.body;
+  const bookFile = req.files && req.files.file && req.files.file[0];
+
+  // --- Validation ---
+  if (!title || !title.trim()) {
+    return res.status(400).json({ error: 'Title is required' });
+  }
+  if (!author_name || !author_name.trim()) {
+    return res.status(400).json({ error: 'Author name is required' });
+  }
+  if (!genre || !genre.trim()) {
+    return res.status(400).json({ error: 'Genre is required' });
+  }
+  if (!description || !description.trim()) {
+    return res.status(400).json({ error: 'Description is required' });
+  }
+  if (description.trim().length < 20) {
+    return res.status(400).json({ error: 'Description must be at least 20 characters' });
+  }
+  if (!bookFile) {
+    return res.status(400).json({ error: 'Book file is required' });
+  }
+
+  const id = uuidv4();
+  const coverImage =
+    req.files && req.files.cover_image && req.files.cover_image[0]
+      ? coverRelPath(req.files.cover_image[0].filename)
+      : null;
+
+  const run = db.transaction(() => {
+    db.prepare(
+      `INSERT INTO books (id, title, author_id, author_name, genre, description,
+         file_path, file_name, status, cover_image)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`
+    ).run(
+      id,
+      title.trim(),
+      req.user.id,
+      author_name.trim(),
+      genre.trim(),
+      description.trim(),
+      bookFile.path,
+      bookFile.originalname,
+      coverImage
+    );
+
+    // Notify librarians about new submission
+    notifyLibrarians(
+      db,
+      'new_submission',
+      'New Book Submission',
+      `"${title.trim()}" by ${author_name.trim()} has been submitted for approval.`,
+      id
+    );
+  });
+
+  try {
+    run();
+    res.status(201).json({
+      message: 'Book submitted successfully',
+      id,
+      status: 'pending',
+    });
+  } catch (err) {
+    // Clean up uploaded files on failure
+    if (bookFile && fs.existsSync(bookFile.path)) {
+      try { fs.unlinkSync(bookFile.path); } catch (e) { /* ignore */ }
+    }
+    if (coverImage) {
+      const cp = path.join(UPLOADS_DIR, coverImage);
+      if (fs.existsSync(cp)) {
+        try { fs.unlinkSync(cp); } catch (e) { /* ignore */ }
+      }
+    }
+    console.error('Submit error:', err.message);
+    res.status(500).json({ error: 'Failed to submit book' });
   }
 });
 
-const uploadFields = upload.fields([
-  { name: 'file', maxCount: 1 },
-  { name: 'cover_image', maxCount: 1 }
-]);
+/**
+ * POST /api/books/draft
+ * Author only. Saves a draft with status='draft'. Returns id for later edit.
+ */
+router.post('/draft', authenticate, authorize('author'), multiUpload, (req, res) => {
+  const db = getDb();
 
-// =========================================================================
-// Helper: resolveFilePath — handles absolute/relative path compatibility
-// =========================================================================
-function resolveFilePath(filePath) {
-  if (!filePath) return null;
-  // If the stored path exists as an absolute path, use it directly
-  if (fs.existsSync(filePath)) return filePath;
-  // Fallback: look up by basename inside the books upload dir
-  const basename = path.basename(filePath);
-  const fallback = path.join(BOOKS_UPLOAD_DIR, basename);
-  if (fs.existsSync(fallback)) return fallback;
-  return filePath; // return original even if missing — caller handles 404
-}
+  const { title, author_name, genre, description, draft_data } = req.body;
+  const bookFile = req.files && req.files.file && req.files.file[0];
 
-// =========================================================================
-// Helper: createNotification
-// =========================================================================
-function createNotification(userId, type, title, message, priority, category, relatedId) {
-  db.prepare(`
-    INSERT INTO notifications (id, user_id, type, title, message, priority, category, related_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(randomUUID(), userId, type, title, message, priority || 'normal', category || 'general', relatedId || null);
-}
-
-// =========================================================================
-// Helper: notifyAllLibrarians
-// =========================================================================
-function notifyAllLibrarians(type, title, message, relatedId) {
-  const librarians = db.prepare('SELECT id FROM users WHERE role = ?').all('librarian');
-  for (const lib of librarians) {
-    createNotification(lib.id, type, title, message, 'normal', 'submissions', relatedId);
+  if (!title && !genre && !description && !bookFile) {
+    return res.status(400).json({ error: 'At least one field is required for a draft' });
   }
-}
 
-// =========================================================================
-// Helper: book list query builder
-// =========================================================================
-function buildBookListQuery(extraWhere, extraParams, extraOrder) {
-  let whereClause = "b.status = 'approved'";
+  const id = uuidv4();
+  const coverImage =
+    req.files && req.files.cover_image && req.files.cover_image[0]
+      ? coverRelPath(req.files.cover_image[0].filename)
+      : null;
+
+  try {
+    db.prepare(
+      `INSERT INTO books (id, title, author_id, author_name, genre, description,
+         file_path, file_name, status, cover_image, draft_data)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)`
+    ).run(
+      id,
+      (title || '').trim(),
+      req.user.id,
+      (author_name || '').trim(),
+      (genre || '').trim(),
+      (description || '').trim(),
+      bookFile ? bookFile.path : null,
+      bookFile ? bookFile.originalname : null,
+      coverImage,
+      draft_data || null
+    );
+
+    res.status(201).json({
+      message: 'Draft saved',
+      id,
+      status: 'draft',
+    });
+  } catch (err) {
+    console.error('Draft error:', err.message);
+    res.status(500).json({ error: 'Failed to save draft' });
+  }
+});
+
+/**
+ * GET /api/books/my-submissions
+ * Author only. Returns own books in all statuses except draft.
+ */
+router.get('/my-submissions', authenticate, authorize('author'), (req, res) => {
+  const db = getDb();
+  const books = db
+    .prepare(
+      `SELECT
+         b.id, b.title, b.author_name, b.genre, b.description,
+         b.cover_image, b.status, b.availability, b.rejection_reason,
+         b.publish_date, b.submitted_date, b.times_borrowed,
+         COALESCE(AVG(r.rating), 0) AS average_rating,
+         COUNT(DISTINCT r.id) AS review_count
+       FROM books b
+       LEFT JOIN reviews r ON r.book_id = b.id AND (r.flagged = 0 OR r.flagged IS NULL)
+       WHERE b.author_id = ? AND b.status != 'draft'
+       GROUP BY b.id
+       ORDER BY b.submitted_date DESC`
+    )
+    .all(req.user.id);
+
+  res.json(
+    books.map((b) => ({
+      ...b,
+      average_rating: Number(b.average_rating),
+      review_count: Number(b.review_count),
+    }))
+  );
+});
+
+/**
+ * GET /api/books/my-drafts
+ * Author only. Returns own draft books.
+ */
+router.get('/my-drafts', authenticate, authorize('author'), (req, res) => {
+  const db = getDb();
+  const books = db
+    .prepare(
+      `SELECT id, title, author_name, genre, description, cover_image,
+              status, draft_data, submitted_date
+       FROM books
+       WHERE author_id = ? AND status = 'draft'
+       ORDER BY submitted_date DESC`
+    )
+    .all(req.user.id);
+  res.json(books);
+});
+
+// ---------------------------------------------------------------------------
+// LIBRARIAN APPROVAL FLOW — static paths
+// ---------------------------------------------------------------------------
+
+/**
+ * GET /api/books/pending
+ * Librarian only. Returns books with status='pending'.
+ */
+router.get('/pending', authenticate, authorize('librarian'), (req, res) => {
+  const db = getDb();
+  const search = (req.query.search || '').trim();
+  const genre = (req.query.genre || '').trim();
+
+  const books = db
+    .prepare(
+      `SELECT
+         b.id, b.title, b.author_name, b.genre, b.description,
+         b.cover_image, b.status, b.availability, b.file_name,
+         b.publish_date, b.submitted_date, b.times_borrowed,
+         u.username AS author_username,
+         u.full_name AS author_full_name
+       FROM books b
+       JOIN users u ON b.author_id = u.id
+       WHERE b.status = 'pending'
+         AND (? = '' OR b.title LIKE '%' || ? || '%' OR b.author_name LIKE '%' || ? || '%')
+         AND (? = '' OR b.genre LIKE '%' || ? || '%')
+       ORDER BY b.submitted_date DESC`
+    )
+    .all(search, search, search, genre, genre);
+
+  res.json(books);
+});
+
+/**
+ * GET /api/books/pending-deletions
+ * Librarian only. Returns books with status='pending_deletion'.
+ */
+router.get('/pending-deletions', authenticate, authorize('librarian'), (req, res) => {
+  const db = getDb();
+  const books = db
+    .prepare(
+      `SELECT
+         b.id, b.title, b.author_name, b.genre, b.description,
+         b.cover_image, b.file_name, b.submitted_date,
+         u.username AS author_username,
+         u.full_name AS author_full_name
+       FROM books b
+       JOIN users u ON b.author_id = u.id
+       WHERE b.status = 'pending_deletion'
+       ORDER BY b.submitted_date DESC`
+    )
+    .all();
+  res.json(books);
+});
+
+/**
+ * POST /api/books/bulk-action
+ * Librarian only. Performs action ('approve', 'reject', 'delete') on multiple
+ * book IDs.
+ */
+router.post('/bulk-action', authenticate, authorize('librarian'), (req, res) => {
+  const db = getDb();
+  const { action, bookIds } = req.body;
+
+  if (!action || !bookIds || !Array.isArray(bookIds) || bookIds.length === 0) {
+    return res.status(400).json({ error: 'action and bookIds are required' });
+  }
+
+  if (!['approve', 'reject', 'delete'].includes(action)) {
+    return res
+      .status(400)
+      .json({ error: 'Invalid action. Must be approve, reject, or delete.' });
+  }
+
+  const results = { succeeded: 0, failed: 0, errors: [] };
+
+  const run = db.transaction(() => {
+    for (const bookId of bookIds) {
+      try {
+        const book = db.prepare('SELECT * FROM books WHERE id = ?').get(bookId);
+
+        if (!book) {
+          results.failed++;
+          results.errors.push(`Book ${bookId} not found`);
+          continue;
+        }
+
+        if (action === 'approve') {
+          if (book.status !== 'pending') {
+            results.failed++;
+            results.errors.push(`Book ${bookId} is not pending (status: ${book.status})`);
+            continue;
+          }
+          db.prepare(
+            `UPDATE books
+             SET status = 'approved', availability = 'available', publish_date = datetime('now')
+             WHERE id = ?`
+          ).run(bookId);
+          createNotification(
+            db,
+            book.author_id,
+            'approval',
+            'Book Approved',
+            `Your book "${book.title}" has been approved.`,
+            'normal',
+            'submissions',
+            bookId
+          );
+        } else if (action === 'reject') {
+          if (book.status !== 'pending') {
+            results.failed++;
+            results.errors.push(`Book ${bookId} is not pending (status: ${book.status})`);
+            continue;
+          }
+          db.prepare("UPDATE books SET status = 'rejected' WHERE id = ?").run(bookId);
+          createNotification(
+            db,
+            book.author_id,
+            'rejection',
+            'Book Rejected',
+            `Your book "${book.title}" was rejected.`,
+            'urgent',
+            'submissions',
+            bookId
+          );
+        } else if (action === 'delete') {
+          if (book.status !== 'pending_deletion') {
+            results.failed++;
+            results.errors.push(
+              `Book ${bookId} is not pending deletion (status: ${book.status})`
+            );
+            continue;
+          }
+          cascadeDeleteBook(db, bookId);
+          deleteBookFiles(book);
+        }
+
+        results.succeeded++;
+      } catch (err) {
+        results.failed++;
+        results.errors.push(err.message);
+      }
+    }
+  });
+
+  try {
+    run();
+    res.json({
+      message: `Bulk ${action} completed. ${results.succeeded} succeeded, ${results.failed} failed.`,
+      results,
+    });
+  } catch (err) {
+    console.error('Bulk action error:', err.message);
+    res.status(500).json({ error: 'Bulk action failed' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// STATIC-PREFIX ROUTES (static prefix + :id)
+// ---------------------------------------------------------------------------
+
+/**
+ * GET /api/books/quick-review/:id
+ * Serves the book file for quick preview. Authenticated users only.
+ * Accessible without borrowing.
+ */
+router.get('/quick-review/:id', authenticate, (req, res) => {
+  const db = getDb();
+  const book = db
+    .prepare("SELECT * FROM books WHERE id = ? AND status = 'approved'")
+    .get(req.params.id);
+
+  if (!book) {
+    return res.status(404).json({ error: 'Book not found' });
+  }
+
+  const filePath = resolveFilePath(book.file_path);
+  if (!filePath) {
+    return res.status(404).json({ error: 'File not found' });
+  }
+
+  res.sendFile(filePath);
+});
+
+// ---------------------------------------------------------------------------
+// BORROW ENGINE — Static routes (must come before parameterized /:id routes)
+// ---------------------------------------------------------------------------
+
+/**
+ * GET /api/books/my-borrows
+ * Student/staff. Returns active borrows for the current user.
+ * Calls processAutoReturns() and generateDueReminders() lazily.
+ */
+router.get('/my-borrows', authenticate, authorize('student', 'staff'), (req, res) => {
+  try { processAutoReturns(); } catch (e) { /* non-critical */ }
+  try { generateDueReminders(); } catch (e) { /* non-critical */ }
+
+  const db = getDb();
+  const borrows = db
+    .prepare(
+      `SELECT br.id, br.book_id, br.borrow_date, br.due_date, br.return_date, br.status,
+              b.title, b.cover_image, b.file_name, b.author_name
+       FROM borrow_records br
+       JOIN books b ON br.book_id = b.id
+       WHERE br.user_id = ? AND br.status = 'active'
+       ORDER BY br.due_date ASC`
+    )
+    .all(req.user.id);
+
+  res.json(borrows);
+});
+
+/**
+ * POST /api/books/bulk-borrow
+ * Student/staff. Borrow multiple books atomically (respects 5-book limit).
+ */
+router.post('/bulk-borrow', authenticate, authorize('student', 'staff'), (req, res) => {
+  try { processAutoReturns(); } catch (e) { /* non-critical */ }
+
+  const db = getDb();
+  const { book_ids, duration_days } = req.body;
+
+  if (!book_ids || !Array.isArray(book_ids) || book_ids.length === 0) {
+    return res.status(400).json({ error: 'book_ids array is required' });
+  }
+
+  const days = Math.min(14, Math.max(1, parseInt(duration_days, 10) || 7));
+
+  // Check active borrow count
+  const activeCount = db
+    .prepare("SELECT COUNT(*) AS cnt FROM borrow_records WHERE user_id = ? AND status = 'active'")
+    .get(req.user.id).cnt;
+
+  if (activeCount + book_ids.length > BORROW_LIMIT) {
+    return res.status(400).json({
+      error: `Borrow limit exceeded. You have ${activeCount} active borrow(s) and can borrow at most ${BORROW_LIMIT - activeCount} more.`,
+    });
+  }
+
+  const borrowed = [];
+  const failed = [];
+
+  const run = db.transaction(() => {
+    for (const bookId of book_ids) {
+      try {
+        const book = db
+          .prepare(
+            "SELECT * FROM books WHERE id = ? AND status = 'approved' AND availability = 'available'"
+          )
+          .get(bookId);
+
+        if (!book) {
+          failed.push({ book_id: bookId, error: 'Book not available' });
+          continue;
+        }
+
+        // Check duplicate active borrow
+        const existing = db
+          .prepare(
+            "SELECT id FROM borrow_records WHERE book_id = ? AND user_id = ? AND status = 'active'"
+          )
+          .get(bookId, req.user.id);
+
+        if (existing) {
+          failed.push({ book_id: bookId, error: 'Already borrowed' });
+          continue;
+        }
+
+        const id = uuidv4();
+        const dueDate = new Date(Date.now() + days * 86400000).toISOString().replace('T', ' ').replace('Z', '');
+
+        db.prepare(
+          `INSERT INTO borrow_records (id, book_id, user_id, due_date, status)
+           VALUES (?, ?, ?, ?, 'active')`
+        ).run(id, bookId, req.user.id, dueDate);
+
+        db.prepare(
+          "UPDATE books SET availability = 'borrowed', times_borrowed = times_borrowed + 1 WHERE id = ?"
+        ).run(bookId);
+
+        borrowed.push({ id, book_id: bookId, due_date: dueDate });
+      } catch (err) {
+        failed.push({ book_id: bookId, error: err.message });
+      }
+    }
+  });
+
+  try {
+    run();
+    res.status(201).json({ borrowed, failed });
+  } catch (err) {
+    console.error('Bulk borrow error:', err.message);
+    res.status(500).json({ error: 'Bulk borrow failed' });
+  }
+});
+
+/**
+ * POST /api/books/bulk-return
+ * Student/staff. Return multiple borrowed books atomically.
+ */
+router.post('/bulk-return', authenticate, authorize('student', 'staff'), (req, res) => {
+  const db = getDb();
+  const { book_ids } = req.body;
+
+  if (!book_ids || !Array.isArray(book_ids) || book_ids.length === 0) {
+    return res.status(400).json({ error: 'book_ids array is required' });
+  }
+
+  let returned = 0;
+
+  const run = db.transaction(() => {
+    for (const bookId of book_ids) {
+      const borrow = db
+        .prepare(
+          "SELECT id FROM borrow_records WHERE book_id = ? AND user_id = ? AND status = 'active'"
+        )
+        .get(bookId, req.user.id);
+
+      if (borrow) {
+        db.prepare(
+          "UPDATE borrow_records SET status = 'returned', return_date = datetime('now') WHERE id = ?"
+        ).run(borrow.id);
+        db.prepare("UPDATE books SET availability = 'available' WHERE id = ?").run(bookId);
+        // Archive related notifications
+        db.prepare(
+          "UPDATE notifications SET is_archived = 1 WHERE related_id = ? AND type IN ('due_reminder', 'auto_return')"
+        ).run(bookId);
+        returned++;
+      }
+    }
+  });
+
+  try {
+    run();
+    res.json({ message: `${returned} book(s) returned successfully`, returned });
+  } catch (err) {
+    console.error('Bulk return error:', err.message);
+    res.status(500).json({ error: 'Bulk return failed' });
+  }
+});
+
+/**
+ * GET /api/books/borrow-records
+ * Librarian only. Returns paginated borrow records with search/filter.
+ */
+router.get('/borrow-records', authenticate, authorize('librarian'), (req, res) => {
+  try { processAutoReturns(); } catch (e) { /* non-critical */ }
+  try { generateDueReminders(); } catch (e) { /* non-critical */ }
+
+  const db = getDb();
+  const search = (req.query.search || '').trim();
+  const status = (req.query.status || '').trim();
+  const dateFrom = (req.query.date_from || '').trim();
+  const dateTo = (req.query.date_to || '').trim();
+  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
+  const offset = (page - 1) * limit;
+
+  let where = 'WHERE 1=1';
   const params = [];
 
-  if (extraWhere) {
-    whereClause += ` AND ${extraWhere}`;
-    params.push(...extraParams);
+  if (search) {
+    where += ' AND (b.title LIKE ? OR u.username LIKE ? OR u.full_name LIKE ?)';
+    params.push(`%${search}%`, `%${search}%`, `%${search}%`);
   }
-
-  const orderClause = extraOrder || 'b.publish_date DESC';
-
-  const sql = `
-    SELECT
-      b.id, b.title, b.author_name, b.genre, b.description,
-      b.cover_image, b.status, b.availability,
-      COALESCE(AVG(r.rating), 0) AS average_rating,
-      COUNT(r.id) AS review_count,
-      b.times_borrowed AS borrow_count,
-      COALESCE(b.publish_date, b.submitted_date) AS created_at
-    FROM books b
-    LEFT JOIN reviews r ON r.book_id = b.id AND r.flagged = 0
-    WHERE ${whereClause}
-    GROUP BY b.id
-    ORDER BY ${orderClause}
-  `;
-
-  return { sql, params };
-}
-
-// =========================================================================
-// BROWSE & DISCOVERY
-// =========================================================================
-
-// GET /api/books — public book list (approved only)
-router.get('/', authenticate, (req, res) => {
-  try {
-    processAutoReturns();
-
-    const { search, genre, page, limit } = req.query;
-    const pageNum = parseInt(page) || 1;
-    const limitNum = parseInt(limit) || 20;
-    const offset = (pageNum - 1) * limitNum;
-
-    let whereExtra = '';
-    const params = [];
-
-    if (search) {
-      whereExtra += '(b.title LIKE ? OR b.author_name LIKE ?)';
-      const term = `%${search}%`;
-      params.push(term, term);
-    }
-
-    if (genre) {
-      if (whereExtra) whereExtra += ' AND ';
-      whereExtra += 'b.genre LIKE ?';
-      params.push(`%${genre}%`);
-    }
-
-    // Count query
-    let countSql = "SELECT COUNT(*) AS total FROM books b WHERE b.status = 'approved'";
-    const countParams = [];
-    if (search) {
-      countSql += ' AND (b.title LIKE ? OR b.author_name LIKE ?)';
-      const term = `%${search}%`;
-      countParams.push(term, term);
-    }
-    if (genre) {
-      countSql += ' AND b.genre LIKE ?';
-      countParams.push(`%${genre}%`);
-    }
-    const { total } = db.prepare(countSql).get(...countParams);
-
-    const { sql } = buildBookListQuery(whereExtra || null, params);
-    const paginatedSql = `${sql} LIMIT ? OFFSET ?`;
-    const books = db.prepare(paginatedSql).all(...params, limitNum, offset);
-
-    // Process cover_image paths
-    const result = books.map(b => ({
-      ...b,
-      cover_image: b.cover_image ? `/${b.cover_image}` : null,
-      average_rating: Math.round(b.average_rating * 100) / 100
-    }));
-
-    return res.json({
-      books: result,
-      total,
-      page: pageNum,
-      limit: limitNum,
-      total_pages: Math.ceil(total / limitNum)
-    });
-  } catch (err) {
-    console.error('GET /api/books error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// GET /api/books/genres — distinct genres list
-router.get('/genres', authenticate, (req, res) => {
-  try {
-    const genres = db.prepare(`
-      SELECT DISTINCT genre FROM books WHERE status = 'approved' ORDER BY genre
-    `).all();
-    // Genres can be comma-separated; split and collect unique
-    const allGenres = [...new Set(genres.flatMap(g => g.genre.split(',').map(s => s.trim()).filter(Boolean)))];
-    return res.json(allGenres);
-  } catch (err) {
-    console.error('GET /api/books/genres error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// GET /api/books/recommendations — top 3 by times_borrowed (requires auth)
-router.get('/recommendations', authenticate, (req, res) => {
-  try {
-    const books = db.prepare(`
-      SELECT
-        b.id, b.title, b.author_name, b.genre, b.description,
-        b.cover_image, b.status, b.availability,
-        COALESCE(AVG(r.rating), 0) AS average_rating,
-        COUNT(r.id) AS review_count,
-        b.times_borrowed AS borrow_count,
-        COALESCE(b.publish_date, b.submitted_date) AS created_at
-      FROM books b
-      LEFT JOIN reviews r ON r.book_id = b.id AND r.flagged = 0
-      WHERE b.status = 'approved'
-      GROUP BY b.id
-      ORDER BY b.times_borrowed DESC
-      LIMIT 3
-    `).all();
-
-    const result = books.map(b => ({
-      ...b,
-      cover_image: b.cover_image ? `/${b.cover_image}` : null,
-      average_rating: Math.round(b.average_rating * 100) / 100
-    }));
-
-    return res.json(result);
-  } catch (err) {
-    console.error('GET /api/books/recommendations error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// GET /api/books/my-submissions — author only; own books (all except draft)
-router.get('/my-submissions', authenticate, authorize('author'), (req, res) => {
-  try {
-    const books = db.prepare(`
-      SELECT
-        b.*,
-        COALESCE(AVG(r.rating), 0) AS average_rating,
-        COUNT(r.id) AS review_count
-      FROM books b
-      LEFT JOIN reviews r ON r.book_id = b.id AND r.flagged = 0
-      WHERE b.author_id = ? AND b.status != 'draft'
-      GROUP BY b.id
-      ORDER BY b.submitted_date DESC
-    `).all(req.user.id);
-
-    const result = books.map(b => ({
-      ...b,
-      cover_image: b.cover_image ? `/${b.cover_image}` : null,
-      average_rating: Math.round(b.average_rating * 100) / 100
-    }));
-
-    return res.json(result);
-  } catch (err) {
-    console.error('GET /api/books/my-submissions error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// GET /api/books/my-drafts — author only; own draft books
-router.get('/my-drafts', authenticate, authorize('author'), (req, res) => {
-  try {
-    const books = db.prepare(`
-      SELECT id, title, author_name, genre, description, cover_image, draft_data,
-             submitted_date, created_at
-      FROM books
-      WHERE author_id = ? AND status = 'draft'
-      ORDER BY submitted_date DESC
-    `).all(req.user.id);
-
-    const result = books.map(b => ({
-      ...b,
-      cover_image: b.cover_image ? `/${b.cover_image}` : null,
-      created_at: b.submitted_date
-    }));
-
-    return res.json(result);
-  } catch (err) {
-    console.error('GET /api/books/my-drafts error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// GET /api/books/pending — librarian only; books with status=pending
-router.get('/pending', authenticate, authorize('librarian'), (req, res) => {
-  try {
-    const { title, author, genre, status, date_from, date_to, page, limit } = req.query;
-    const pageNum = parseInt(page) || 1;
-    const limitNum = parseInt(limit) || 20;
-    const offset = (pageNum - 1) * limitNum;
-
-    let whereClauses = [];
-    const params = [];
-
-    // Base: show everything except draft unless filtering by status
-    if (status) {
-      whereClauses.push('b.status = ?');
-      params.push(status);
+  if (status) {
+    if (status === 'overdue') {
+      where += " AND br.status = 'active' AND br.due_date < datetime('now')";
     } else {
-      whereClauses.push("b.status != 'draft'");
-    }
-
-    if (title) {
-      whereClauses.push('b.title LIKE ?');
-      params.push(`%${title}%`);
-    }
-    if (author) {
-      whereClauses.push('b.author_name LIKE ?');
-      params.push(`%${author}%`);
-    }
-    if (genre) {
-      whereClauses.push('b.genre LIKE ?');
-      params.push(`%${genre}%`);
-    }
-    if (date_from) {
-      whereClauses.push('b.submitted_date >= ?');
-      params.push(date_from);
-    }
-    if (date_to) {
-      whereClauses.push('b.submitted_date <= ?');
-      params.push(date_to);
-    }
-
-    const whereSQL = whereClauses.length ? `WHERE ${whereClauses.join(' AND ')}` : '';
-
-    const countRow = db.prepare(`SELECT COUNT(*) AS total FROM books b ${whereSQL}`).get(...params);
-    const total = countRow.total;
-
-    const books = db.prepare(`
-      SELECT b.*, u.username AS author_username
-      FROM books b
-      JOIN users u ON b.author_id = u.id
-      ${whereSQL}
-      ORDER BY b.submitted_date DESC
-      LIMIT ? OFFSET ?
-    `).all(...params, limitNum, offset);
-
-    const result = books.map(b => ({
-      ...b,
-      cover_image: b.cover_image ? `/${b.cover_image}` : null
-    }));
-
-    return res.json({
-      books: result,
-      total,
-      page: pageNum,
-      limit: limitNum,
-      total_pages: Math.ceil(total / limitNum)
-    });
-  } catch (err) {
-    console.error('GET /api/books/pending error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// GET /api/books/pending-deletions — librarian only
-router.get('/pending-deletions', authenticate, authorize('librarian'), (req, res) => {
-  try {
-    const books = db.prepare(`
-      SELECT b.*, u.username AS author_username
-      FROM books b
-      JOIN users u ON b.author_id = u.id
-      WHERE b.status = 'pending_deletion'
-      ORDER BY b.submitted_date DESC
-    `).all();
-
-    const result = books.map(b => ({
-      ...b,
-      cover_image: b.cover_image ? `/${b.cover_image}` : null
-    }));
-
-    return res.json(result);
-  } catch (err) {
-    console.error('GET /api/books/pending-deletions error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// =========================================================================
-// BORROW RECORDS — librarian (must be before /:id)
-// =========================================================================
-
-// GET /api/books/borrow-records/export — CSV export
-router.get('/borrow-records/export', authenticate, authorize('librarian'), (req, res) => {
-  try {
-    processAutoReturns();
-
-    const records = db.prepare(`
-      SELECT
-        br.id, br.book_id, br.user_id, br.borrow_date, br.due_date,
-        br.return_date, br.status,
-        b.title AS book_title, u.username
-      FROM borrow_records br
-      JOIN books b ON br.book_id = b.id
-      JOIN users u ON br.user_id = u.id
-      ORDER BY br.borrow_date DESC
-    `).all();
-
-    // Generate CSV
-    const header = 'id,book_id,user_id,borrow_date,due_date,return_date,status,book_title,username\n';
-    const rows = records.map(r => {
-      const escape = (v) => {
-        const s = String(v || '');
-        if (s.includes(',') || s.includes('"') || s.includes('\n')) {
-          return `"${s.replace(/"/g, '""')}"`;
-        }
-        return s;
-      };
-      return [r.id, r.book_id, r.user_id, r.borrow_date, r.due_date,
-              r.return_date || '', r.status, escape(r.book_title), escape(r.username)].join(',');
-    }).join('\n');
-
-    res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', 'attachment; filename="borrow-records.csv"');
-    return res.send(header + rows);
-  } catch (err) {
-    console.error('GET /api/books/borrow-records/export error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// GET /api/books/borrow-records — librarian only; all borrow records
-router.get('/borrow-records', authenticate, authorize('librarian'), (req, res) => {
-  try {
-    processAutoReturns();
-    generateDueReminders();
-
-    const { search, status, date_from, date_to, page, limit } = req.query;
-    const pageNum = parseInt(page) || 1;
-    const limitNum = parseInt(limit) || 20;
-    const offset = (pageNum - 1) * limitNum;
-
-    let whereClauses = [];
-    const params = [];
-
-    if (search) {
-      whereClauses.push('(b.title LIKE ? OR u.username LIKE ?)');
-      const term = `%${search}%`;
-      params.push(term, term);
-    }
-    if (status) {
-      whereClauses.push('br.status = ?');
+      where += ' AND br.status = ?';
       params.push(status);
     }
-    if (date_from) {
-      whereClauses.push('br.borrow_date >= ?');
-      params.push(date_from);
-    }
-    if (date_to) {
-      whereClauses.push('br.borrow_date <= ?');
-      params.push(date_to);
-    }
+  }
+  if (dateFrom) {
+    where += ' AND br.borrow_date >= ?';
+    params.push(dateFrom);
+  }
+  if (dateTo) {
+    where += ' AND br.borrow_date <= ?';
+    params.push(dateTo);
+  }
 
-    const whereSQL = whereClauses.length ? `WHERE ${whereClauses.join(' AND ')}` : '';
+  const countRow = db
+    .prepare(
+      `SELECT COUNT(*) AS total
+       FROM borrow_records br
+       JOIN books b ON br.book_id = b.id
+       JOIN users u ON br.user_id = u.id ${where}`
+    )
+    .get(...params);
 
-    const countRow = db.prepare(`
-      SELECT COUNT(*) AS total FROM borrow_records br
-      JOIN books b ON br.book_id = b.id
-      JOIN users u ON br.user_id = u.id
-      ${whereSQL}
-    `).get(...params);
+  const records = db
+    .prepare(
+      `SELECT br.id, br.book_id, br.borrow_date, br.due_date, br.return_date, br.status,
+              b.title AS book_title, b.author_name,
+              u.username AS borrower_username, u.full_name AS borrower_name
+       FROM borrow_records br
+       JOIN books b ON br.book_id = b.id
+       JOIN users u ON br.user_id = u.id
+       ${where}
+       ORDER BY br.borrow_date DESC
+       LIMIT ? OFFSET ?`
+    )
+    .all(...params, limit, offset);
 
-    const records = db.prepare(`
-      SELECT
-        br.id, br.book_id, br.user_id, br.borrow_date AS borrowed_at,
-        br.due_date, br.return_date AS returned_at, br.status,
-        b.title AS book_title, u.username
-      FROM borrow_records br
-      JOIN books b ON br.book_id = b.id
-      JOIN users u ON br.user_id = u.id
-      ${whereSQL}
-      ORDER BY br.borrow_date DESC
-      LIMIT ? OFFSET ?
-    `).all(...params, limitNum, offset);
+  const now = new Date().toISOString();
+  const enriched = records.map((r) => ({
+    ...r,
+    display_status: r.status === 'active' && r.due_date < now ? 'overdue' : r.status,
+  }));
 
-    return res.json({
-      records,
+  res.json({
+    records: enriched,
+    pagination: {
+      page,
+      limit,
       total: countRow.total,
-      page: pageNum,
-      limit: limitNum,
-      total_pages: Math.ceil(countRow.total / limitNum)
-    });
-  } catch (err) {
-    console.error('GET /api/books/borrow-records error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// GET /api/books/my-borrows — own active borrow records
-router.get('/my-borrows', authenticate, (req, res) => {
-  try {
-    processAutoReturns();
-
-    const records = db.prepare(`
-      SELECT
-        br.id, br.book_id, br.user_id, br.borrow_date AS borrowed_at,
-        br.due_date, br.return_date AS returned_at, br.status,
-        b.title AS book_title, b.author_name, b.cover_image, b.file_name
-      FROM borrow_records br
-      JOIN books b ON br.book_id = b.id
-      WHERE br.user_id = ?
-      ORDER BY br.borrow_date DESC
-    `).all(req.user.id);
-
-    const activeCount = records.filter(r => r.status === 'active').length;
-
-    const result = records.map(r => ({
-      ...r,
-      cover_image: r.cover_image ? `/${r.cover_image}` : null
-    }));
-
-    return res.json({
-      borrows: result,
-      active_count: activeCount,
-      borrow_limit: BORROW_LIMIT
-    });
-  } catch (err) {
-    console.error('GET /api/books/my-borrows error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// =========================================================================
-// AUTHOR SUBMISSION FLOW
-// =========================================================================
-
-// POST /api/books/submit — author only; multipart
-router.post('/submit', authenticate, authorize('author'), (req, res, next) => {
-  uploadFields(req, res, (err) => {
-    if (err) {
-      if (err.code === 'LIMIT_FILE_SIZE') {
-        return res.status(400).json({ error: 'File too large. Maximum size is 50MB.' });
-      }
-      return res.status(400).json({ error: err.message });
-    }
-
-    try {
-      const { title, author_name, genre, description } = req.body;
-
-      // Validate required fields
-      if (!title || typeof title !== 'string' || title.trim().length === 0) {
-        return res.status(400).json({ error: 'Title is required' });
-      }
-      if (!genre || typeof genre !== 'string' || genre.trim().length === 0) {
-        return res.status(400).json({ error: 'Genre is required' });
-      }
-      if (!description || typeof description !== 'string' || description.trim().length < 20) {
-        return res.status(400).json({ error: 'Description must be at least 20 characters' });
-      }
-      if (!req.files || !req.files.file || req.files.file.length === 0) {
-        return res.status(400).json({ error: 'Book file is required' });
-      }
-
-      // Validate cover file size if provided
-      if (req.files.cover_image && req.files.cover_image.length > 0) {
-        const coverFile = req.files.cover_image[0];
-        if (coverFile.size > COVER_MAX_SIZE) {
-          // Remove the uploaded cover file
-          fs.unlinkSync(coverFile.path);
-          return res.status(400).json({ error: 'Cover image too large. Maximum size is 2MB.' });
-        }
-      }
-
-      const bookFile = req.files.file[0];
-      const id = randomUUID();
-      const filePath = bookFile.path;
-      const fileName = bookFile.originalname;
-      const coverImage = req.files.cover_image && req.files.cover_image.length > 0
-        ? `uploads/covers/${req.files.cover_image[0].filename}`
-        : null;
-
-      db.prepare(`
-        INSERT INTO books (id, title, author_id, author_name, genre, description,
-                           file_path, file_name, status, cover_image)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
-      `).run(id, title.trim(), req.user.id, (author_name || req.user.full_name || '').trim(),
-             genre.trim(), description.trim(), filePath, fileName, coverImage);
-
-      // Notify librarians
-      notifyAllLibrarians('new_submission', 'New Book Submission',
-        `A new book "${title}" has been submitted by ${req.user.username}.`, id);
-
-      // If this book was a draft, clean up any existing draft_data
-      if (req.body.draft_id) {
-        // Draft already submitted, no extra action needed
-      }
-
-      const book = db.prepare('SELECT * FROM books WHERE id = ?').get(id);
-
-      return res.status(201).json({
-        message: 'Book submitted successfully',
-        book: {
-          id: book.id,
-          title: book.title,
-          status: book.status,
-          cover_image: book.cover_image ? `/${book.cover_image}` : null
-        }
-      });
-    } catch (err) {
-      console.error('POST /api/books/submit error:', err);
-      return res.status(500).json({ error: 'Internal server error' });
-    }
+      total_pages: Math.ceil(countRow.total / limit),
+    },
   });
 });
 
-// POST /api/books/draft — author only; multipart; status=draft
-router.post('/draft', authenticate, authorize('author'), (req, res, next) => {
-  uploadFields(req, res, (err) => {
-    if (err) {
-      if (err.code === 'LIMIT_FILE_SIZE') {
-        return res.status(400).json({ error: 'File too large. Maximum size is 50MB.' });
-      }
-      return res.status(400).json({ error: err.message });
-    }
+/**
+ * GET /api/books/borrow-records/export
+ * Librarian only. Exports all borrow records as CSV.
+ */
+router.get('/borrow-records/export', authenticate, authorize('librarian'), (req, res) => {
+  try { processAutoReturns(); } catch (e) { /* non-critical */ }
 
-    try {
-      const { title, author_name, genre, description, draft_data } = req.body;
+  const db = getDb();
 
-      // For drafts, validate only what's provided
-      if (!title && !genre && !description && !req.files) {
-        return res.status(400).json({ error: 'At least one field is required for a draft' });
-      }
+  const records = db
+    .prepare(
+      `SELECT b.title AS book_title, u.username AS borrower_username,
+              u.full_name AS borrower_name,
+              br.borrow_date, br.due_date, br.return_date, br.status
+       FROM borrow_records br
+       JOIN books b ON br.book_id = b.id
+       JOIN users u ON br.user_id = u.id
+       ORDER BY br.borrow_date DESC`
+    )
+    .all();
 
-      const id = randomUUID();
-      let filePath = null;
-      let fileName = null;
-      let coverImage = null;
+  // Build CSV manually
+  const headers = [
+    'Book Title',
+    'Borrower Username',
+    'Borrower Name',
+    'Borrow Date',
+    'Due Date',
+    'Return Date',
+    'Status',
+  ];
+  const csvRows = [headers.join(',')];
 
-      if (req.files && req.files.file && req.files.file.length > 0) {
-        const bookFile = req.files.file[0];
-        filePath = bookFile.path;
-        fileName = bookFile.originalname;
-      }
-
-      if (req.files && req.files.cover_image && req.files.cover_image.length > 0) {
-        const coverFile = req.files.cover_image[0];
-        if (coverFile.size > COVER_MAX_SIZE) {
-          fs.unlinkSync(coverFile.path);
-          return res.status(400).json({ error: 'Cover image too large. Maximum size is 2MB.' });
-        }
-        coverImage = `uploads/covers/${coverFile.filename}`;
-      }
-
-      const draftDataJson = draft_data ? JSON.stringify(draft_data) : null;
-
-      db.prepare(`
-        INSERT INTO books (id, title, author_id, author_name, genre, description,
-                           file_path, file_name, status, cover_image, draft_data)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)
-      `).run(
-        id,
-        (title || '').trim(),
-        req.user.id,
-        (author_name || req.user.full_name || '').trim(),
-        (genre || '').trim(),
-        (description || '').trim(),
-        filePath,
-        fileName,
-        coverImage,
-        draftDataJson
-      );
-
-      const book = db.prepare('SELECT id, title, status, cover_image FROM books WHERE id = ?').get(id);
-
-      return res.status(201).json({
-        message: 'Draft saved',
-        book: {
-          id: book.id,
-          title: book.title,
-          status: book.status,
-          cover_image: book.cover_image ? `/${book.cover_image}` : null
-        }
-      });
-    } catch (err) {
-      console.error('POST /api/books/draft error:', err);
-      return res.status(500).json({ error: 'Internal server error' });
-    }
-  });
-});
-
-// =========================================================================
-// BULK OPERATIONS (must be before /:id routes)
-// =========================================================================
-
-// POST /api/books/bulk-borrow — bulk borrow; atomic
-router.post('/bulk-borrow', authenticate, authorize('student', 'staff'), (req, res) => {
-  try {
-    processAutoReturns();
-
-    const { bookIds, duration_days, duration_seconds } = req.body;
-
-    if (!bookIds || !Array.isArray(bookIds) || bookIds.length === 0) {
-      return res.status(400).json({ error: 'bookIds array is required' });
-    }
-
-    // Validate duration
-    if (duration_days && (duration_days < 1 || duration_days > 14)) {
-      return res.status(400).json({ error: 'duration_days must be between 1 and 14' });
-    }
-    if (duration_seconds && (duration_seconds < 10 || duration_seconds > 300)) {
-      return res.status(400).json({ error: 'duration_seconds must be between 10 and 300' });
-    }
-    if (!duration_days && !duration_seconds) {
-      return res.status(400).json({ error: 'Either duration_days or duration_seconds is required' });
-    }
-
-    // Calculate due date
-    let dueDate;
-    if (duration_seconds) {
-      dueDate = new Date(Date.now() + duration_seconds * 1000).toISOString().replace('T', ' ').split('.')[0];
-    } else {
-      dueDate = new Date(Date.now() + duration_days * 86400000).toISOString().replace('T', ' ').split('.')[0];
-    }
-
-    // Check active borrow count
-    const activeCount = db.prepare(
-      "SELECT COUNT(*) AS count FROM borrow_records WHERE user_id = ? AND status = 'active'"
-    ).get(req.user.id).count;
-
-    if (activeCount + bookIds.length > BORROW_LIMIT) {
-      return res.status(400).json({
-        error: `Borrow limit exceeded. You have ${activeCount} active borrow(s) and can borrow at most ${BORROW_LIMIT}.`
-      });
-    }
-
-    // Check for duplicates
-    const alreadyBorrowed = db.prepare(`
-      SELECT book_id FROM borrow_records
-      WHERE user_id = ? AND book_id IN (${bookIds.map(() => '?').join(',')}) AND status = 'active'
-    `).all(req.user.id, ...bookIds);
-
-    if (alreadyBorrowed.length > 0) {
-      return res.status(400).json({
-        error: 'You have already borrowed one or more of these books.'
-      });
-    }
-
-    // Verify books exist and are available
-    const books = db.prepare(`
-      SELECT id, title, status, availability FROM books
-      WHERE id IN (${bookIds.map(() => '?').join(',')})
-    `).all(...bookIds);
-
-    const unavailable = books.filter(b => b.status !== 'approved' || b.availability !== 'available');
-    if (unavailable.length > 0) {
-      return res.status(400).json({
-        error: `Some books are not available for borrowing: ${unavailable.map(b => b.title).join(', ')}`
-      });
-    }
-
-    // All checks passed — execute atomic transaction
-    const insertBorrow = db.prepare(`
-      INSERT INTO borrow_records (id, book_id, user_id, due_date, status)
-      VALUES (?, ?, ?, ?, 'active')
-    `);
-    const updateBook = db.prepare(
-      "UPDATE books SET availability = 'borrowed', times_borrowed = times_borrowed + 1 WHERE id = ?"
-    );
-
-    const tx = db.transaction(() => {
-      for (const bookId of bookIds) {
-        const borrowId = randomUUID();
-        insertBorrow.run(borrowId, bookId, req.user.id, dueDate);
-        updateBook.run(bookId);
-      }
-    });
-
-    tx();
-
-    return res.json({
-      message: `${bookIds.length} book(s) borrowed successfully`,
-      due_date: dueDate,
-      borrowed_count: bookIds.length
-    });
-  } catch (err) {
-    console.error('POST /api/books/bulk-borrow error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+  for (const r of records) {
+    const row = [
+      `"${(r.book_title || '').replace(/"/g, '""')}"`,
+      `"${(r.borrower_username || '').replace(/"/g, '""')}"`,
+      `"${(r.borrower_name || '').replace(/"/g, '""')}"`,
+      r.borrow_date || '',
+      r.due_date || '',
+      r.return_date || '',
+      r.status || '',
+    ];
+    csvRows.push(row.join(','));
   }
+
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', 'attachment; filename="borrow-records.csv"');
+  res.send(csvRows.join('\n'));
 });
 
-// POST /api/books/bulk-return — bulk return
-router.post('/bulk-return', authenticate, authorize('student', 'staff'), (req, res) => {
-  try {
-    const { borrowIds } = req.body;
+// ===========================================================================
+// PARAMETERIZED ROUTES (with :id) — ALL STATIC ROUTES MUST COME BEFORE HERE
+// ===========================================================================
 
-    if (!borrowIds || !Array.isArray(borrowIds) || borrowIds.length === 0) {
-      return res.status(400).json({ error: 'borrowIds array is required' });
-    }
+// ---------------------------------------------------------------------------
+// BROWSE & DISCOVERY — single book
+// ---------------------------------------------------------------------------
 
-    const placeholders = borrowIds.map(() => '?').join(',');
-
-    // Verify all borrows belong to this user and are active
-    const borrows = db.prepare(`
-      SELECT id, book_id FROM borrow_records
-      WHERE id IN (${placeholders}) AND user_id = ? AND status = 'active'
-    `).all(...borrowIds, req.user.id);
-
-    if (borrows.length === 0) {
-      return res.status(400).json({ error: 'No active borrow records found for the given IDs' });
-    }
-
-    const updateBorrow = db.prepare(
-      "UPDATE borrow_records SET status = 'returned', return_date = datetime('now') WHERE id = ?"
-    );
-    const updateBook = db.prepare(
-      "UPDATE books SET availability = 'available' WHERE id = ?"
-    );
-
-    // Archive related notifications
-    const archiveNotifs = db.prepare(`
-      UPDATE notifications SET is_archived = 1
-      WHERE user_id = ? AND related_id IN (${borrows.map(() => '?').join(',')})
-      AND type IN ('due_reminder', 'auto_return')
-    `);
-
-    const bookIds = borrows.map(b => b.bookId || b.book_id);
-
-    const tx = db.transaction(() => {
-      for (const borrow of borrows) {
-        updateBorrow.run(borrow.id);
-        updateBook.run(borrow.book_id);
-      }
-      archiveNotifs.run(req.user.id, ...borrows.map(b => b.book_id));
-    });
-
-    tx();
-
-    return res.json({ message: `${borrows.length} book(s) returned successfully` });
-  } catch (err) {
-    console.error('POST /api/books/bulk-return error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// POST /api/books/bulk-action — librarian only
-router.post('/bulk-action', authenticate, authorize('librarian'), (req, res) => {
-  try {
-    const { action, bookIds } = req.body;
-
-    if (!action || !['approve', 'reject', 'delete'].includes(action)) {
-      return res.status(400).json({ error: 'Action must be one of: approve, reject, delete' });
-    }
-    if (!bookIds || !Array.isArray(bookIds) || bookIds.length === 0) {
-      return res.status(400).json({ error: 'bookIds array is required' });
-    }
-
-    const placeholders = bookIds.map(() => '?').join(',');
-
-    if (action === 'approve') {
-      const approveTx = db.transaction(() => {
-        const books = db.prepare(`
-          SELECT id, title, author_id FROM books WHERE id IN (${placeholders}) AND status = 'pending'
-        `).all(...bookIds);
-
-        db.prepare(`
-          UPDATE books SET status = 'approved', availability = 'available', publish_date = datetime('now')
-          WHERE id IN (${placeholders}) AND status = 'pending'
-        `).run(...bookIds);
-
-        for (const book of books) {
-          createNotification(book.author_id, 'approval', 'Book Approved',
-            `Your book "${book.title}" has been approved.`, 'normal', 'submissions', book.id);
-        }
-      });
-      approveTx();
-      return res.json({ message: `${bookIds.length} book(s) approved` });
-    }
-
-    if (action === 'reject') {
-      const { reason } = req.body;
-      const rejectTx = db.transaction(() => {
-        const books = db.prepare(`
-          SELECT id, title, author_id FROM books WHERE id IN (${placeholders}) AND status = 'pending'
-        `).all(...bookIds);
-
-        db.prepare(`
-          UPDATE books SET status = 'rejected', rejection_reason = ?
-          WHERE id IN (${placeholders}) AND status = 'pending'
-        `).run(reason || null, ...bookIds);
-
-        for (const book of books) {
-          const msg = reason
-            ? `Your book "${book.title}" was rejected. Reason: ${reason}`
-            : `Your book "${book.title}" was rejected.`;
-          createNotification(book.author_id, 'rejection', 'Book Rejected',
-            msg, 'urgent', 'submissions', book.id);
-        }
-      });
-      rejectTx();
-      return res.json({ message: `${bookIds.length} book(s) rejected` });
-    }
-
-    if (action === 'delete') {
-      const deleteTx = db.transaction(() => {
-        const books = db.prepare(`
-          SELECT id, title, author_id FROM books WHERE id IN (${placeholders})
-        `).all(...bookIds);
-
-        db.prepare(`
-          DELETE FROM bookmarks WHERE book_id IN (${placeholders})
-        `).run(...bookIds);
-        db.prepare(`
-          DELETE FROM highlights WHERE book_id IN (${placeholders})
-        `).run(...bookIds);
-        db.prepare(`
-          DELETE FROM reading_progress WHERE book_id IN (${placeholders})
-        `).run(...bookIds);
-        db.prepare(`
-          DELETE FROM book_versions WHERE book_id IN (${placeholders})
-        `).run(...bookIds);
-        db.prepare(`
-          DELETE FROM downloaded_books WHERE book_id IN (${placeholders})
-        `).run(...bookIds);
-
-        // Delete reviews and their replies
-        for (const bookId of bookIds) {
-          const reviewIds = db.prepare('SELECT id FROM reviews WHERE book_id = ?').all(bookId).map(r => r.id);
-          if (reviewIds.length > 0) {
-            const rPlaceholders = reviewIds.map(() => '?').join(',');
-            db.prepare(`DELETE FROM review_replies WHERE review_id IN (${rPlaceholders})`).run(...reviewIds);
-            db.prepare(`DELETE FROM reviews WHERE id IN (${rPlaceholders})`).run(...reviewIds);
-          }
-        }
-
-        db.prepare(`
-          DELETE FROM notifications WHERE related_id IN (${placeholders})
-        `).run(...bookIds);
-        db.prepare(`
-          DELETE FROM borrow_records WHERE book_id IN (${placeholders})
-        `).run(...bookIds);
-
-        // Delete files from disk
-        for (const book of books) {
-          if (book.file_path && fs.existsSync(book.file_path)) {
-            fs.unlinkSync(book.file_path);
-          }
-          // Also cover images
-          const bookRow = db.prepare('SELECT cover_image FROM books WHERE id = ?').get(book.id);
-          if (bookRow && bookRow.cover_image) {
-            const coverPath = path.join(__dirname, '..', bookRow.cover_image);
-            if (fs.existsSync(coverPath)) fs.unlinkSync(coverPath);
-          }
-        }
-
-        db.prepare(`
-          DELETE FROM books WHERE id IN (${placeholders})
-        `).run(...bookIds);
-      });
-      deleteTx();
-      return res.json({ message: `${bookIds.length} book(s) permanently deleted` });
-    }
-  } catch (err) {
-    console.error('POST /api/books/bulk-action error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// =========================================================================
-// SINGLE BOOK OPERATIONS (param-based)
-// =========================================================================
-
-// GET /api/books/:id — single book detail
+/**
+ * GET /api/books/:id
+ * Single book detail. Approved books visible to all authenticated users.
+ * Authors can see their own books regardless of status.
+ */
 router.get('/:id', authenticate, (req, res) => {
-  try {
-    const book = db.prepare(`
-      SELECT b.*,
-        COALESCE(AVG(r.rating), 0) AS average_rating,
-        COUNT(r.id) AS review_count
-      FROM books b
-      LEFT JOIN reviews r ON r.book_id = b.id AND r.flagged = 0
-      WHERE b.id = ?
-      GROUP BY b.id
-    `).get(req.params.id);
+  const db = getDb();
 
-    if (!book) {
-      return res.status(404).json({ error: 'Book not found' });
-    }
+  const book = db
+    .prepare(
+      `SELECT
+         b.*,
+         COALESCE(AVG(r.rating), 0) AS average_rating,
+         COUNT(DISTINCT r.id) AS review_count
+       FROM books b
+       LEFT JOIN reviews r ON r.book_id = b.id AND (r.flagged = 0 OR r.flagged IS NULL)
+       WHERE b.id = ?
+       GROUP BY b.id`
+    )
+    .get(req.params.id);
 
-    // Authorization: approved books visible to all; authors see own pending/draft
-    const isAuthor = book.author_id === req.user.id;
-    const isApproved = book.status === 'approved';
-
-    if (!isApproved && !isAuthor && req.user.role !== 'librarian') {
-      return res.status(404).json({ error: 'Book not found' });
-    }
-
-    return res.json({
-      ...book,
-      cover_image: book.cover_image ? `/${book.cover_image}` : null,
-      average_rating: Math.round(book.average_rating * 100) / 100
-    });
-  } catch (err) {
-    console.error('GET /api/books/:id error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+  if (!book) {
+    return res.status(404).json({ error: 'Book not found' });
   }
+
+  // Non-authors can only see approved books
+  if (book.status !== 'approved' && book.author_id !== req.user.id) {
+    return res.status(404).json({ error: 'Book not found' });
+  }
+
+  // Remove sensitive/internal fields from response
+  delete book.file_path;
+  delete book.file_name;
+  delete book.draft_data;
+  delete book.author_id;
+  book.average_rating = Number(book.average_rating);
+  book.review_count = Number(book.review_count);
+
+  res.json(book);
 });
 
-// PUT /api/books/:id — edit book (author only, own book)
-router.put('/:id', authenticate, authorize('author'), (req, res, next) => {
-  uploadFields(req, res, (err) => {
-    if (err) {
-      if (err.code === 'LIMIT_FILE_SIZE') {
-        return res.status(400).json({ error: 'File too large. Maximum size is 50MB.' });
-      }
-      return res.status(400).json({ error: err.message });
+// ---------------------------------------------------------------------------
+// AUTHOR SUBMISSION FLOW — parameterized
+// ---------------------------------------------------------------------------
+
+/**
+ * PUT /api/books/:id
+ * Author only (own book). Edits title, description, genre, cover.
+ * If the book was approved and not currently borrowed, reverts to pending
+ * and notifies librarians. Editing is blocked if the book is currently borrowed.
+ */
+router.put('/:id', authenticate, authorize('author'), multiUpload, (req, res) => {
+  const db = getDb();
+  const book = db.prepare('SELECT * FROM books WHERE id = ?').get(req.params.id);
+
+  if (!book) {
+    return res.status(404).json({ error: 'Book not found' });
+  }
+  if (book.author_id !== req.user.id) {
+    return res.status(403).json({ error: 'You can only edit your own books' });
+  }
+
+  // Block edit if book is approved AND currently borrowed
+  if (book.status === 'approved') {
+    const activeBorrow = db
+      .prepare("SELECT id FROM borrow_records WHERE book_id = ? AND status = 'active'")
+      .get(req.params.id);
+    if (activeBorrow) {
+      return res
+        .status(400)
+        .json({ error: 'Cannot edit a book that is currently borrowed' });
     }
+  }
 
-    try {
-      const book = db.prepare('SELECT * FROM books WHERE id = ? AND author_id = ?').get(req.params.id, req.user.id);
-      if (!book) {
-        return res.status(404).json({ error: 'Book not found or not owned by you' });
+  const { title, author_name, genre, description } = req.body;
+
+  const newTitle = title !== undefined ? title.trim() : book.title;
+  const newAuthorName =
+    author_name !== undefined ? author_name.trim() : book.author_name;
+  const newGenre = genre !== undefined ? genre.trim() : book.genre;
+  const newDescription =
+    description !== undefined ? description.trim() : book.description;
+
+  // Editing an approved book reverts to pending
+  const wasApproved = book.status === 'approved';
+  const newStatus = wasApproved ? 'pending' : book.status;
+
+  // Update cover if provided
+  let newCoverImage = book.cover_image;
+  if (req.files && req.files.cover_image && req.files.cover_image[0]) {
+    newCoverImage = coverRelPath(req.files.cover_image[0].filename);
+    // Delete old cover file
+    if (book.cover_image) {
+      const oldCover = path.join(UPLOADS_DIR, book.cover_image);
+      if (fs.existsSync(oldCover)) {
+        try { fs.unlinkSync(oldCover); } catch (e) { /* ignore */ }
       }
+    }
+  }
 
-      // Check if book can be edited
-      if (book.status === 'pending_deletion') {
-        return res.status(400).json({ error: 'Cannot edit a book that is pending deletion' });
-      }
+  const run = db.transaction(() => {
+    db.prepare(
+      `UPDATE books
+       SET title = ?, author_name = ?, genre = ?, description = ?,
+           cover_image = ?, status = ?, draft_data = NULL
+       WHERE id = ?`
+    ).run(newTitle, newAuthorName, newGenre, newDescription, newCoverImage, newStatus, req.params.id);
 
-      // If approved, check if currently borrowed
-      if (book.status === 'approved') {
-        const activeBorrow = db.prepare(
-          "SELECT id FROM borrow_records WHERE book_id = ? AND status = 'active' LIMIT 1"
-        ).get(book.id);
-        if (activeBorrow) {
-          return res.status(400).json({ error: 'Cannot edit a book that is currently borrowed' });
-        }
-      }
-
-      const { title, author_name, genre, description, draft_data } = req.body;
-
-      // Build update fields
-      const updates = [];
-      const params = [];
-
-      if (title) { updates.push('title = ?'); params.push(title.trim()); }
-      if (author_name) { updates.push('author_name = ?'); params.push(author_name.trim()); }
-      if (genre) { updates.push('genre = ?'); params.push(genre.trim()); }
-      if (description) { updates.push('description = ?'); params.push(description.trim()); }
-      if (draft_data) { updates.push('draft_data = ?'); params.push(JSON.stringify(draft_data)); }
-
-      // Handle file replacement
-      if (req.files && req.files.file && req.files.file.length > 0) {
-        const newFile = req.files.file[0];
-        updates.push('file_path = ?');
-        params.push(newFile.path);
-        updates.push('file_name = ?');
-        params.push(newFile.originalname);
-        // Delete old file
-        if (book.file_path && fs.existsSync(book.file_path)) {
-          fs.unlinkSync(book.file_path);
-        }
-      }
-
-      // Handle cover image replacement
-      if (req.files && req.files.cover_image && req.files.cover_image.length > 0) {
-        const coverFile = req.files.cover_image[0];
-        if (coverFile.size > COVER_MAX_SIZE) {
-          fs.unlinkSync(coverFile.path);
-          return res.status(400).json({ error: 'Cover image too large. Maximum size is 2MB.' });
-        }
-        updates.push('cover_image = ?');
-        const coverPath = `uploads/covers/${coverFile.filename}`;
-        params.push(coverPath);
-        // Delete old cover
-        if (book.cover_image) {
-          const oldCoverPath = path.join(__dirname, '..', book.cover_image);
-          if (fs.existsSync(oldCoverPath)) fs.unlinkSync(oldCoverPath);
-        }
-      }
-
-      if (updates.length === 0) {
-        return res.status(400).json({ error: 'No fields to update' });
-      }
-
-      // If book was approved and is being edited, revert to pending and notify librarians
-      let needsLibrarianNotif = false;
-      if (book.status === 'approved') {
-        updates.push("status = 'pending'");
-        needsLibrarianNotif = true;
-      }
-
-      params.push(book.id);
-      db.prepare(`UPDATE books SET ${updates.join(', ')} WHERE id = ?`).run(...params);
-
-      if (needsLibrarianNotif) {
-        notifyAllLibrarians('new_submission', 'Book Edited',
-          `Book "${title || book.title}" was edited by ${req.user.username} and needs re-approval.`, book.id);
-      }
-
-      const updated = db.prepare('SELECT * FROM books WHERE id = ?').get(book.id);
-
-      return res.json({
-        message: 'Book updated successfully',
-        book: {
-          id: updated.id,
-          title: updated.title,
-          status: updated.status,
-          cover_image: updated.cover_image ? `/${updated.cover_image}` : null
-        }
-      });
-    } catch (err) {
-      console.error('PUT /api/books/:id error:', err);
-      return res.status(500).json({ error: 'Internal server error' });
+    if (wasApproved) {
+      notifyLibrarians(
+        db,
+        'new_submission',
+        'Book Edited',
+        `"${newTitle}" has been edited and requires re-approval.`,
+        req.params.id
+      );
     }
   });
+
+  try {
+    run();
+    res.json({
+      message: wasApproved
+        ? 'Book updated and requires re-approval'
+        : 'Book updated successfully',
+      status: newStatus,
+    });
+  } catch (err) {
+    console.error('Edit error:', err.message);
+    res.status(500).json({ error: 'Failed to update book' });
+  }
 });
 
-// DELETE /api/books/:id — author only (own book); soft delete → pending_deletion
+/**
+ * DELETE /api/books/:id
+ * Author only (own book). Sets status='pending_deletion' (two-phase soft delete).
+ * Blocked if the book is currently borrowed.
+ */
 router.delete('/:id', authenticate, authorize('author'), (req, res) => {
-  try {
-    const book = db.prepare('SELECT * FROM books WHERE id = ? AND author_id = ?').get(req.params.id, req.user.id);
-    if (!book) {
-      return res.status(404).json({ error: 'Book not found or not owned by you' });
-    }
+  const db = getDb();
+  const book = db.prepare('SELECT * FROM books WHERE id = ?').get(req.params.id);
 
-    if (book.status === 'pending_deletion') {
-      return res.status(400).json({ error: 'Book is already pending deletion' });
-    }
-
-    // Block if currently borrowed
-    const activeBorrow = db.prepare(
-      "SELECT id FROM borrow_records WHERE book_id = ? AND status = 'active' LIMIT 1"
-    ).get(book.id);
-    if (activeBorrow) {
-      return res.status(400).json({ error: 'Cannot delete a book that is currently borrowed' });
-    }
-
-    // Soft delete: set status to pending_deletion
-    db.prepare("UPDATE books SET status = 'pending_deletion' WHERE id = ?").run(book.id);
-
-    // Notify librarians
-    notifyAllLibrarians('delete_request', 'Book Deletion Requested',
-      `Author "${req.user.username}" has requested deletion of "${book.title}".`, book.id);
-
-    return res.json({ message: 'Deletion request submitted. Pending librarian approval.' });
-  } catch (err) {
-    console.error('DELETE /api/books/:id error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+  if (!book) {
+    return res.status(404).json({ error: 'Book not found' });
   }
+  if (book.author_id !== req.user.id) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+
+  // Block if currently borrowed
+  const activeBorrow = db
+    .prepare("SELECT id FROM borrow_records WHERE book_id = ? AND status = 'active'")
+    .get(req.params.id);
+  if (activeBorrow) {
+    return res
+      .status(400)
+      .json({ error: 'Cannot delete a book that is currently borrowed' });
+  }
+
+  db.prepare("UPDATE books SET status = 'pending_deletion' WHERE id = ?").run(
+    req.params.id
+  );
+
+  // Notify librarians about the delete request
+  notifyLibrarians(
+    db,
+    'delete_request',
+    'Delete Request',
+    `Author requested deletion of "${book.title}".`,
+    req.params.id
+  );
+
+  res.json({ message: 'Delete request submitted. Awaiting librarian approval.' });
 });
 
-// POST /api/books/:id/borrow — borrow a book
-router.post('/:id/borrow', authenticate, authorize('student', 'staff'), (req, res) => {
-  try {
-    processAutoReturns();
+// ---------------------------------------------------------------------------
+// LIBRARIAN APPROVAL FLOW — parameterized
+// ---------------------------------------------------------------------------
 
-    const { duration_days, duration_seconds } = req.body;
-
-    // Validate duration
-    if (!duration_days && !duration_seconds) {
-      return res.status(400).json({ error: 'Either duration_days or duration_seconds is required' });
-    }
-    if (duration_days && (duration_days < 1 || duration_days > 14)) {
-      return res.status(400).json({ error: 'duration_days must be between 1 and 14' });
-    }
-    if (duration_seconds && (duration_seconds < 10 || duration_seconds > 300)) {
-      return res.status(400).json({ error: 'duration_seconds must be between 10 and 300' });
-    }
-
-    // Check book exists and is available
-    const book = db.prepare("SELECT * FROM books WHERE id = ? AND status = 'approved'").get(req.params.id);
-    if (!book) {
-      return res.status(404).json({ error: 'Book not found or not available' });
-    }
-    if (book.availability !== 'available') {
-      return res.status(400).json({ error: 'Book is currently not available' });
-    }
-
-    // Check if user already has an active borrow for this book
-    const existingBorrow = db.prepare(
-      "SELECT id FROM borrow_records WHERE book_id = ? AND user_id = ? AND status = 'active' LIMIT 1"
-    ).get(req.params.id, req.user.id);
-    if (existingBorrow) {
-      return res.status(400).json({ error: 'You have already borrowed this book' });
-    }
-
-    // Check borrow limit
-    const activeCount = db.prepare(
-      "SELECT COUNT(*) AS count FROM borrow_records WHERE user_id = ? AND status = 'active'"
-    ).get(req.user.id).count;
-    if (activeCount >= BORROW_LIMIT) {
-      return res.status(400).json({
-        error: `Borrow limit reached. You have ${activeCount} active borrow(s). Maximum is ${BORROW_LIMIT}.`
-      });
-    }
-
-    // Calculate due date
-    let dueDate;
-    if (duration_seconds) {
-      dueDate = new Date(Date.now() + duration_seconds * 1000).toISOString().replace('T', ' ').split('.')[0];
-    } else {
-      dueDate = new Date(Date.now() + duration_days * 86400000).toISOString().replace('T', ' ').split('.')[0];
-    }
-
-    // Create borrow record and update book atomically
-    const borrowId = randomUUID();
-
-    const tx = db.transaction(() => {
-      db.prepare(`
-        INSERT INTO borrow_records (id, book_id, user_id, due_date, status)
-        VALUES (?, ?, ?, ?, 'active')
-      `).run(borrowId, req.params.id, req.user.id, dueDate);
-
-      db.prepare(`
-        UPDATE books SET availability = 'borrowed', times_borrowed = times_borrowed + 1 WHERE id = ?
-      `).run(req.params.id);
-    });
-
-    tx();
-
-    return res.status(201).json({
-      message: 'Book borrowed successfully',
-      borrow: {
-        id: borrowId,
-        book_id: req.params.id,
-        due_date: dueDate,
-        status: 'active'
-      }
-    });
-  } catch (err) {
-    console.error('POST /api/books/:id/borrow error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// POST /api/books/:id/return — return a book
-router.post('/:id/return', authenticate, authorize('student', 'staff'), (req, res) => {
-  try {
-    const bookId = req.params.id;
-
-    const borrow = db.prepare(`
-      SELECT id FROM borrow_records
-      WHERE book_id = ? AND user_id = ? AND status = 'active'
-      LIMIT 1
-    `).get(bookId, req.user.id);
-
-    if (!borrow) {
-      return res.status(400).json({ error: 'No active borrow record found for this book' });
-    }
-
-    const tx = db.transaction(() => {
-      db.prepare(`
-        UPDATE borrow_records SET status = 'returned', return_date = datetime('now') WHERE id = ?
-      `).run(borrow.id);
-
-      db.prepare(`
-        UPDATE books SET availability = 'available' WHERE id = ?
-      `).run(bookId);
-
-      // Archive related notifications
-      db.prepare(`
-        UPDATE notifications SET is_archived = 1
-        WHERE user_id = ? AND related_id = ? AND type IN ('due_reminder', 'auto_return')
-      `).run(req.user.id, bookId);
-    });
-
-    tx();
-
-    return res.json({ message: 'Book returned successfully' });
-  } catch (err) {
-    console.error('POST /api/books/:id/return error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// PATCH /api/books/:id/approve — librarian only
+/**
+ * PATCH /api/books/:id/approve
+ * Librarian only. Sets status='approved', availability='available',
+ * publish_date=now(). Notifies the author.
+ */
 router.patch('/:id/approve', authenticate, authorize('librarian'), (req, res) => {
-  try {
-    const book = db.prepare("SELECT * FROM books WHERE id = ? AND status = 'pending'").get(req.params.id);
-    if (!book) {
-      return res.status(404).json({ error: 'Pending book not found' });
-    }
+  const db = getDb();
+  const book = db.prepare('SELECT * FROM books WHERE id = ?').get(req.params.id);
 
-    db.prepare(`
-      UPDATE books SET status = 'approved', availability = 'available', publish_date = datetime('now')
-      WHERE id = ?
-    `).run(book.id);
-
-    createNotification(book.author_id, 'approval', 'Book Approved',
-      `Your book "${book.title}" has been approved.`, 'normal', 'submissions', book.id);
-
-    return res.json({ message: 'Book approved successfully' });
-  } catch (err) {
-    console.error('PATCH /api/books/:id/approve error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+  if (!book) {
+    return res.status(404).json({ error: 'Book not found' });
   }
+  if (book.status !== 'pending' && book.status !== 'draft') {
+    return res
+      .status(400)
+      .json({ error: `Book status is '${book.status}', not pending or draft` });
+  }
+
+  db.prepare(
+    `UPDATE books
+     SET status = 'approved', availability = 'available', publish_date = datetime('now')
+     WHERE id = ?`
+  ).run(req.params.id);
+
+  createNotification(
+    db,
+    book.author_id,
+    'approval',
+    'Book Approved',
+    `Your book "${book.title}" has been approved.`,
+    'normal',
+    'submissions',
+    req.params.id
+  );
+
+  res.json({ message: 'Book approved successfully' });
 });
 
-// PATCH /api/books/:id/reject — librarian only
+/**
+ * PATCH /api/books/:id/reject
+ * Librarian only. Sets status='rejected', stores optional rejection_reason.
+ * Notifies the author.
+ */
 router.patch('/:id/reject', authenticate, authorize('librarian'), (req, res) => {
-  try {
-    const book = db.prepare("SELECT * FROM books WHERE id = ? AND status = 'pending'").get(req.params.id);
-    if (!book) {
-      return res.status(404).json({ error: 'Pending book not found' });
-    }
+  const db = getDb();
+  const book = db.prepare('SELECT * FROM books WHERE id = ?').get(req.params.id);
 
-    const { reason } = req.body;
-
-    db.prepare("UPDATE books SET status = 'rejected', rejection_reason = ? WHERE id = ?").run(
-      reason || null, book.id
-    );
-
-    const msg = reason
-      ? `Your book "${book.title}" was rejected. Reason: ${reason}`
-      : `Your book "${book.title}" was rejected.`;
-    createNotification(book.author_id, 'rejection', 'Book Rejected', msg, 'urgent', 'submissions', book.id);
-
-    return res.json({ message: 'Book rejected' });
-  } catch (err) {
-    console.error('PATCH /api/books/:id/reject error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+  if (!book) {
+    return res.status(404).json({ error: 'Book not found' });
   }
+  if (book.status !== 'pending') {
+    return res
+      .status(400)
+      .json({ error: `Book status is '${book.status}', not pending` });
+  }
+
+  const reason = req.body.reason || null;
+
+  db.prepare(
+    "UPDATE books SET status = 'rejected', rejection_reason = ? WHERE id = ?"
+  ).run(reason, req.params.id);
+
+  const message = reason
+    ? `Your book "${book.title}" was rejected. Reason: ${reason}`
+    : `Your book "${book.title}" was rejected.`;
+
+  createNotification(
+    db,
+    book.author_id,
+    'rejection',
+    'Book Rejected',
+    message,
+    'urgent',
+    'submissions',
+    req.params.id
+  );
+
+  res.json({ message: 'Book rejected', rejection_reason: reason });
 });
 
-// PATCH /api/books/:id/approve-delete — librarian only; hard cascade delete
-router.patch('/:id/approve-delete', authenticate, authorize('librarian'), (req, res) => {
-  try {
-    const book = db.prepare("SELECT * FROM books WHERE id = ? AND status = 'pending_deletion'").get(req.params.id);
+/**
+ * PATCH /api/books/:id/approve-delete
+ * Librarian only. Hard-deletes the book with full cascade.
+ * Notifies the author and all past borrowers.
+ */
+router.patch(
+  '/:id/approve-delete',
+  authenticate,
+  authorize('librarian'),
+  (req, res) => {
+    const db = getDb();
+    const book = db.prepare('SELECT * FROM books WHERE id = ?').get(req.params.id);
+
     if (!book) {
-      return res.status(404).json({ error: 'Book pending deletion not found' });
+      return res.status(404).json({ error: 'Book not found' });
+    }
+    if (book.status !== 'pending_deletion') {
+      return res
+        .status(400)
+        .json({ error: 'Book is not pending deletion' });
     }
 
+    const bookTitle = book.title;
     const bookId = book.id;
 
-    const tx = db.transaction(() => {
-      // 1. Bookmarks
-      db.prepare('DELETE FROM bookmarks WHERE book_id = ?').run(bookId);
-      // 2. Highlights
-      db.prepare('DELETE FROM highlights WHERE book_id = ?').run(bookId);
-      // 3. Reading progress
-      db.prepare('DELETE FROM reading_progress WHERE book_id = ?').run(bookId);
-      // 4. Book versions
-      db.prepare('DELETE FROM book_versions WHERE book_id = ?').run(bookId);
-      // 5. Downloaded books
-      db.prepare('DELETE FROM downloaded_books WHERE book_id = ?').run(bookId);
-      // 6. Review replies + reviews
-      const reviewIds = db.prepare('SELECT id FROM reviews WHERE book_id = ?').all(bookId).map(r => r.id);
-      if (reviewIds.length > 0) {
-        const rPlaceholders = reviewIds.map(() => '?').join(',');
-        db.prepare(`DELETE FROM review_replies WHERE review_id IN (${rPlaceholders})`).run(...reviewIds);
-        db.prepare(`DELETE FROM reviews WHERE book_id = ?`).run(bookId);
-      }
-      // 7. Notifications
-      db.prepare("DELETE FROM notifications WHERE related_id = ? AND type = 'delete_request'").run(bookId);
-      db.prepare("DELETE FROM notifications WHERE related_id = ? AND type IN ('approval', 'rejection', 'new_submission', 'book_deleted')").run(bookId);
-      // 8. Borrow records
-      db.prepare('DELETE FROM borrow_records WHERE book_id = ?').run(bookId);
-      // 9. Notify author
-      createNotification(book.author_id, 'book_deleted', 'Book Deleted',
-        `Your book "${book.title}" has been permanently deleted.`, 'normal', 'general', bookId);
-      // 10. Delete book row
-      db.prepare('DELETE FROM books WHERE id = ?').run(bookId);
-    });
+    // Notify author about deletion
+    createNotification(
+      db,
+      book.author_id,
+      'book_deleted',
+      'Book Deleted',
+      `Your book "${bookTitle}" has been permanently deleted.`,
+      'urgent',
+      'submissions',
+      bookId
+    );
 
-    tx();
-
-    // 11. Delete files from disk (outside transaction — file ops)
-    try {
-      if (book.file_path && fs.existsSync(book.file_path)) {
-        fs.unlinkSync(book.file_path);
+    // Notify all users who have borrowed this book
+    const borrowers = db
+      .prepare('SELECT DISTINCT user_id FROM borrow_records WHERE book_id = ?')
+      .all(bookId);
+    for (const borrower of borrowers) {
+      if (borrower.user_id !== book.author_id) {
+        createNotification(
+          db,
+          borrower.user_id,
+          'book_deleted',
+          'Book Removed',
+          `"${bookTitle}" has been removed from the library.`,
+          'urgent',
+          'borrow',
+          bookId
+        );
       }
-      if (book.cover_image) {
-        const coverPath = path.join(__dirname, '..', book.cover_image);
-        if (fs.existsSync(coverPath)) fs.unlinkSync(coverPath);
-      }
-    } catch (fileErr) {
-      console.error('Error deleting files:', fileErr);
-      // Non-fatal: record is already deleted
     }
 
-    return res.json({ message: 'Book permanently deleted' });
-  } catch (err) {
-    console.error('PATCH /api/books/:id/approve-delete error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
-  }
-});
+    // Cascade delete from all related tables
+    cascadeDeleteBook(db, bookId);
 
-// PATCH /api/books/:id/reject-delete — librarian only; restore to approved
-router.patch('/:id/reject-delete', authenticate, authorize('librarian'), (req, res) => {
-  try {
-    const book = db.prepare("SELECT * FROM books WHERE id = ? AND status = 'pending_deletion'").get(req.params.id);
+    // Delete files from disk
+    deleteBookFiles(book);
+
+    res.json({ message: 'Book permanently deleted.' });
+  }
+);
+
+/**
+ * PATCH /api/books/:id/reject-delete
+ * Librarian only. Restores book from pending_deletion back to approved.
+ * Notifies the author.
+ */
+router.patch(
+  '/:id/reject-delete',
+  authenticate,
+  authorize('librarian'),
+  (req, res) => {
+    const db = getDb();
+    const book = db.prepare('SELECT * FROM books WHERE id = ?').get(req.params.id);
+
     if (!book) {
-      return res.status(404).json({ error: 'Book pending deletion not found' });
+      return res.status(404).json({ error: 'Book not found' });
+    }
+    if (book.status !== 'pending_deletion') {
+      return res
+        .status(400)
+        .json({ error: 'Book is not pending deletion' });
     }
 
-    db.prepare("UPDATE books SET status = 'approved' WHERE id = ?").run(book.id);
+    db.prepare("UPDATE books SET status = 'approved' WHERE id = ?").run(
+      req.params.id
+    );
 
-    createNotification(book.author_id, 'approval', 'Deletion Request Rejected',
-      `The deletion request for your book "${book.title}" has been rejected. The book is restored.`,
-      'normal', 'submissions', book.id);
+    createNotification(
+      db,
+      book.author_id,
+      'approval',
+      'Delete Request Rejected',
+      `Your request to delete "${book.title}" has been rejected. The book remains in the catalog.`,
+      'normal',
+      'submissions',
+      req.params.id
+    );
 
-    return res.json({ message: 'Deletion request rejected. Book restored to approved.' });
-  } catch (err) {
-    console.error('PATCH /api/books/:id/reject-delete error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+    res.json({ message: 'Delete request rejected. Book restored.' });
   }
-});
+);
 
-// GET /api/books/:id/download — authenticated; serves book file
+// ---------------------------------------------------------------------------
+// FILE DOWNLOAD & PREVIEW
+// ---------------------------------------------------------------------------
+
+/**
+ * GET /api/books/:id/download
+ * Authenticated. Serves the book file as download.
+ * Records the download in downloaded_books if not already present.
+ */
 router.get('/:id/download', authenticate, (req, res) => {
-  try {
-    const book = db.prepare("SELECT * FROM books WHERE id = ? AND status = 'approved'").get(req.params.id);
-    if (!book) {
-      return res.status(404).json({ error: 'Book not found' });
-    }
-    if (!book.file_path) {
-      return res.status(404).json({ error: 'Book file not available' });
-    }
+  const db = getDb();
+  const book = db.prepare('SELECT * FROM books WHERE id = ?').get(req.params.id);
 
-    const resolvedPath = resolveFilePath(book.file_path);
-    if (!resolvedPath || !fs.existsSync(resolvedPath)) {
-      return res.status(404).json({ error: 'Book file not found on server' });
-    }
-
-    // Inserts into downloaded_books if not already present
-    const existing = db.prepare('SELECT id FROM downloaded_books WHERE book_id = ?').get(book.id);
-    if (!existing) {
-      db.prepare(`
-        INSERT INTO downloaded_books (id, book_id, source) VALUES (?, ?, 'manual_upload')
-      `).run(randomUUID(), book.id);
-    }
-
-    return res.download(resolvedPath, book.file_name || path.basename(resolvedPath));
-  } catch (err) {
-    console.error('GET /api/books/:id/download error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+  if (!book) {
+    return res.status(404).json({ error: 'Book not found' });
   }
+
+  // Only approved books are downloadable (authors can download their own)
+  if (book.status !== 'approved' && book.author_id !== req.user.id) {
+    return res.status(404).json({ error: 'Book not found' });
+  }
+
+  const filePath = resolveFilePath(book.file_path);
+  if (!filePath) {
+    return res.status(404).json({ error: 'File not found on server' });
+  }
+
+  // Track download in downloaded_books if not already present
+  const existing = db
+    .prepare('SELECT id FROM downloaded_books WHERE book_id = ?')
+    .get(book.id);
+
+  if (!existing) {
+    db.prepare(
+      'INSERT INTO downloaded_books (id, book_id, source) VALUES (?, ?, ?)'
+    ).run(uuidv4(), book.id, 'manual_upload');
+  }
+
+  const fileName = book.file_name || path.basename(filePath);
+  res.download(filePath, fileName);
 });
 
-// GET /api/books/:id/view — authenticated; serves book file inline (for PDF reader)
+/**
+ * GET /api/books/:id/view
+ * Authenticated. Serves the book file inline (for PDF reader).
+ */
 router.get('/:id/view', authenticate, (req, res) => {
-  try {
-    const book = db.prepare("SELECT * FROM books WHERE id = ? AND status = 'approved'").get(req.params.id);
-    if (!book) {
-      return res.status(404).json({ error: 'Book not found' });
-    }
-    if (!book.file_path) {
-      return res.status(404).json({ error: 'Book file not available' });
-    }
+  const db = getDb();
+  const book = db.prepare('SELECT * FROM books WHERE id = ?').get(req.params.id);
 
-    const resolvedPath = resolveFilePath(book.file_path);
-    if (!resolvedPath || !fs.existsSync(resolvedPath)) {
-      return res.status(404).json({ error: 'Book file not found on server' });
-    }
-
-    return res.sendFile(resolvedPath);
-  } catch (err) {
-    console.error('GET /api/books/:id/view error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+  if (!book) {
+    return res.status(404).json({ error: 'Book not found' });
   }
+
+  // Allow viewing if approved, or if user is the author
+  if (book.status !== 'approved' && book.author_id !== req.user.id) {
+    return res.status(404).json({ error: 'Book not found' });
+  }
+
+  const filePath = resolveFilePath(book.file_path);
+  if (!filePath) {
+    return res.status(404).json({ error: 'File not found on server' });
+  }
+
+  res.sendFile(filePath);
 });
 
-// GET /api/books/:id/preview — librarian only; serves file inline
+/**
+ * GET /api/books/:id/preview
+ * Librarian only. Serves the book file inline for preview panel.
+ */
 router.get('/:id/preview', authenticate, authorize('librarian'), (req, res) => {
+  const db = getDb();
+  const book = db.prepare('SELECT * FROM books WHERE id = ?').get(req.params.id);
+
+  if (!book) {
+    return res.status(404).json({ error: 'Book not found' });
+  }
+
+  const filePath = resolveFilePath(book.file_path);
+  if (!filePath) {
+    return res.status(404).json({ error: 'File not found on server' });
+  }
+
+  res.sendFile(filePath);
+});
+
+// ==========================================================================
+// SA-4b: BORROW ENGINE — Parameterized routes
+// ==========================================================================
+
+/**
+ * POST /api/books/:id/borrow
+ * Student/staff. Borrow a single book. Accepts duration_days (1-14) or
+ * duration_seconds (10-300 for fast-expiry test mode).
+ */
+router.post('/:id/borrow', authenticate, authorize('student', 'staff'), (req, res) => {
+  try { processAutoReturns(); } catch (e) { /* non-critical */ }
+
+  const db = getDb();
+  const bookId = req.params.id;
+
+  // Check active borrow limit
+  const activeCount = db
+    .prepare("SELECT COUNT(*) AS cnt FROM borrow_records WHERE user_id = ? AND status = 'active'")
+    .get(req.user.id).cnt;
+
+  if (activeCount >= BORROW_LIMIT) {
+    return res
+      .status(400)
+      .json({ error: `Borrow limit reached. You can have at most ${BORROW_LIMIT} active borrows.` });
+  }
+
+  // Check book availability
+  const book = db
+    .prepare("SELECT * FROM books WHERE id = ? AND status = 'approved' AND availability = 'available'")
+    .get(bookId);
+
+  if (!book) {
+    return res.status(400).json({ error: 'Book is currently not available' });
+  }
+
+  // Check for existing active borrow of this book by same user
+  const existing = db
+    .prepare("SELECT id FROM borrow_records WHERE book_id = ? AND user_id = ? AND status = 'active'")
+    .get(bookId, req.user.id);
+
+  if (existing) {
+    return res.status(400).json({ error: 'You have already borrowed this book' });
+  }
+
+  // Calculate due date (SQLite datetime format: YYYY-MM-DD HH:MM:SS)
+  const { duration_days, duration_seconds } = req.body;
+  let dueDate;
+  if (duration_seconds) {
+    const secs = Math.min(300, Math.max(10, parseInt(duration_seconds, 10) || 30));
+    dueDate = new Date(Date.now() + secs * 1000).toISOString().replace('T', ' ').replace('Z', '');
+  } else {
+    const days = Math.min(14, Math.max(1, parseInt(duration_days, 10) || 7));
+    dueDate = new Date(Date.now() + days * 86400000).toISOString().replace('T', ' ').replace('Z', '');
+  }
+
+  const id = uuidv4();
+
+  const run = db.transaction(() => {
+    db.prepare(
+      `INSERT INTO borrow_records (id, book_id, user_id, due_date, status)
+       VALUES (?, ?, ?, ?, 'active')`
+    ).run(id, bookId, req.user.id, dueDate);
+
+    db.prepare(
+      "UPDATE books SET availability = 'borrowed', times_borrowed = times_borrowed + 1 WHERE id = ?"
+    ).run(bookId);
+  });
+
   try {
-    const book = db.prepare("SELECT * FROM books WHERE id = ?").get(req.params.id);
-    if (!book) {
-      return res.status(404).json({ error: 'Book not found' });
-    }
-    if (!book.file_path) {
-      return res.status(404).json({ error: 'Book file not available' });
-    }
-
-    const resolvedPath = resolveFilePath(book.file_path);
-    if (!resolvedPath || !fs.existsSync(resolvedPath)) {
-      return res.status(404).json({ error: 'Book file not found on server' });
-    }
-
-    return res.sendFile(resolvedPath);
+    run();
+    res.status(201).json({
+      message: 'Book borrowed successfully',
+      borrow: {
+        id,
+        book_id: bookId,
+        user_id: req.user.id,
+        borrow_date: new Date().toISOString(),
+        due_date: dueDate,
+        status: 'active',
+      },
+    });
   } catch (err) {
-    console.error('GET /api/books/:id/preview error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+    console.error('Borrow error:', err.message);
+    res.status(500).json({ error: 'Failed to borrow book' });
   }
 });
 
-// =========================================================================
-// BOOKMARKS
-// =========================================================================
+/**
+ * POST /api/books/:id/return
+ * Student/staff. Return a borrowed book.
+ */
+router.post('/:id/return', authenticate, authorize('student', 'staff'), (req, res) => {
+  const db = getDb();
+  const bookId = req.params.id;
 
-// GET /api/books/:id/bookmarks — own bookmarks for this book
+  const borrow = db
+    .prepare("SELECT * FROM borrow_records WHERE book_id = ? AND user_id = ? AND status = 'active'")
+    .get(bookId, req.user.id);
+
+  if (!borrow) {
+    return res.status(400).json({ error: 'No active borrow found for this book' });
+  }
+
+  const run = db.transaction(() => {
+    db.prepare(
+      "UPDATE borrow_records SET status = 'returned', return_date = datetime('now') WHERE id = ?"
+    ).run(borrow.id);
+
+    db.prepare("UPDATE books SET availability = 'available' WHERE id = ?").run(bookId);
+
+    // Archive related due_reminder and auto_return notifications
+    db.prepare(
+      "UPDATE notifications SET is_archived = 1 WHERE related_id = ? AND type IN ('due_reminder', 'auto_return')"
+    ).run(bookId);
+  });
+
+  try {
+    run();
+    res.json({ message: 'Book returned successfully' });
+  } catch (err) {
+    console.error('Return error:', err.message);
+    res.status(500).json({ error: 'Failed to return book' });
+  }
+});
+
+// ==========================================================================
+// SA-4b: BOOKMARKS
+// ==========================================================================
+
+/**
+ * GET /api/books/:id/bookmarks
+ * Returns the current user's bookmarks for a given book.
+ */
 router.get('/:id/bookmarks', authenticate, (req, res) => {
-  try {
-    const bookmarks = db.prepare(`
-      SELECT id, user_id, book_id, page_number, label, created_at
-      FROM bookmarks
-      WHERE user_id = ? AND book_id = ?
-      ORDER BY page_number ASC
-    `).all(req.user.id, req.params.id);
-
-    return res.json(bookmarks);
-  } catch (err) {
-    console.error('GET /api/books/:id/bookmarks error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
-  }
+  const db = getDb();
+  const bookmarks = db
+    .prepare(
+      `SELECT id, page_number, label, created_at
+       FROM bookmarks
+       WHERE book_id = ? AND user_id = ?
+       ORDER BY page_number ASC`
+    )
+    .all(req.params.id, req.user.id);
+  res.json(bookmarks);
 });
 
-// POST /api/books/:id/bookmarks — create bookmark
+/**
+ * POST /api/books/:id/bookmarks
+ * Create a bookmark for the current user on this book.
+ * Body: { page_number, label? }
+ */
 router.post('/:id/bookmarks', authenticate, (req, res) => {
+  const db = getDb();
+  const { page_number, label } = req.body;
+
+  if (!page_number || parseInt(page_number, 10) < 1) {
+    return res.status(400).json({ error: 'Valid page_number is required' });
+  }
+
+  const id = uuidv4();
+  const page = parseInt(page_number, 10);
+
   try {
-    const { page, label } = req.body;
-
-    if (!page || typeof page !== 'number' || page < 1) {
-      return res.status(400).json({ error: 'Valid page number is required' });
-    }
-
-    const book = db.prepare("SELECT id FROM books WHERE id = ? AND status = 'approved'").get(req.params.id);
-    if (!book) {
-      return res.status(404).json({ error: 'Book not found' });
-    }
-
-    const id = randomUUID();
-    db.prepare(`
-      INSERT INTO bookmarks (id, user_id, book_id, page_number, label)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(id, req.user.id, req.params.id, page, label || null);
-
-    const bookmark = db.prepare('SELECT * FROM bookmarks WHERE id = ?').get(id);
-
-    return res.status(201).json(bookmark);
+    db.prepare(
+      `INSERT INTO bookmarks (id, user_id, book_id, page_number, label)
+       VALUES (?, ?, ?, ?, ?)`
+    ).run(id, req.user.id, req.params.id, page, label || null);
+    res.status(201).json({
+      id,
+      page_number: page,
+      label: label || null,
+      created_at: new Date().toISOString(),
+    });
   } catch (err) {
-    console.error('POST /api/books/:id/bookmarks error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+    console.error('Bookmark error:', err.message);
+    res.status(500).json({ error: 'Failed to create bookmark' });
   }
 });
 
-// DELETE /api/books/:id/bookmarks/:bmId — delete own bookmark
-router.delete('/:id/bookmarks/:bmId', authenticate, (req, res) => {
-  try {
-    const result = db.prepare(
-      'DELETE FROM bookmarks WHERE id = ? AND user_id = ? AND book_id = ?'
-    ).run(req.params.bmId, req.user.id, req.params.id);
+/**
+ * DELETE /api/books/bookmarks/:bookmarkId
+ * Delete the current user's bookmark.
+ */
+router.delete('/bookmarks/:bookmarkId', authenticate, (req, res) => {
+  const db = getDb();
+  const result = db
+    .prepare('DELETE FROM bookmarks WHERE id = ? AND user_id = ?')
+    .run(req.params.bookmarkId, req.user.id);
 
-    if (result.changes === 0) {
-      return res.status(404).json({ error: 'Bookmark not found' });
-    }
-
-    return res.json({ message: 'Bookmark deleted' });
-  } catch (err) {
-    console.error('DELETE /api/books/:id/bookmarks/:bmId error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+  if (result.changes === 0) {
+    return res.status(404).json({ error: 'Bookmark not found' });
   }
+  res.json({ message: 'Bookmark deleted' });
 });
 
-// =========================================================================
-// HIGHLIGHTS
-// =========================================================================
+// ==========================================================================
+// SA-4b: HIGHLIGHTS
+// ==========================================================================
 
-// GET /api/books/:id/highlights — own highlights for this book
+/**
+ * GET /api/books/:id/highlights
+ * Returns the current user's highlights for a given book.
+ */
 router.get('/:id/highlights', authenticate, (req, res) => {
-  try {
-    const highlights = db.prepare(`
-      SELECT id, user_id, book_id, page_number, text_content, color, created_at
-      FROM highlights
-      WHERE user_id = ? AND book_id = ?
-      ORDER BY page_number ASC, created_at ASC
-    `).all(req.user.id, req.params.id);
-
-    return res.json(highlights);
-  } catch (err) {
-    console.error('GET /api/books/:id/highlights error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
-  }
+  const db = getDb();
+  const highlights = db
+    .prepare(
+      `SELECT id, page_number, text_content, color, created_at
+       FROM highlights
+       WHERE book_id = ? AND user_id = ?
+       ORDER BY page_number ASC`
+    )
+    .all(req.params.id, req.user.id);
+  res.json(highlights);
 });
 
-// POST /api/books/:id/highlights — create highlight
+/**
+ * POST /api/books/:id/highlights
+ * Create a highlight for the current user on this book.
+ * Body: { page_number, text_content, color? }
+ * Default color: #c9a84c
+ */
 router.post('/:id/highlights', authenticate, (req, res) => {
+  const db = getDb();
+  const { page_number, text_content, color } = req.body;
+
+  if (!page_number || parseInt(page_number, 10) < 1) {
+    return res.status(400).json({ error: 'Valid page_number is required' });
+  }
+  if (!text_content || !text_content.trim()) {
+    return res.status(400).json({ error: 'text_content is required' });
+  }
+
+  const id = uuidv4();
+  const page = parseInt(page_number, 10);
+
   try {
-    const { page, text, color } = req.body;
-
-    if (!page || typeof page !== 'number' || page < 1) {
-      return res.status(400).json({ error: 'Valid page number is required' });
-    }
-    if (!text || typeof text !== 'string' || text.trim().length === 0) {
-      return res.status(400).json({ error: 'Highlight text is required' });
-    }
-
-    const book = db.prepare("SELECT id FROM books WHERE id = ? AND status = 'approved'").get(req.params.id);
-    if (!book) {
-      return res.status(404).json({ error: 'Book not found' });
-    }
-
-    const id = randomUUID();
-    db.prepare(`
-      INSERT INTO highlights (id, user_id, book_id, page_number, text_content, color)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(id, req.user.id, req.params.id, page, text.trim(), color || '#c9a84c');
-
-    const highlight = db.prepare('SELECT * FROM highlights WHERE id = ?').get(id);
-
-    return res.status(201).json(highlight);
+    db.prepare(
+      `INSERT INTO highlights (id, user_id, book_id, page_number, text_content, color)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    ).run(id, req.user.id, req.params.id, page, text_content.trim(), color || '#c9a84c');
+    res.status(201).json({
+      id,
+      page_number: page,
+      text_content: text_content.trim(),
+      color: color || '#c9a84c',
+      created_at: new Date().toISOString(),
+    });
   } catch (err) {
-    console.error('POST /api/books/:id/highlights error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+    console.error('Highlight error:', err.message);
+    res.status(500).json({ error: 'Failed to create highlight' });
   }
 });
 
-// DELETE /api/books/:id/highlights/:hlId — delete own highlight
-router.delete('/:id/highlights/:hlId', authenticate, (req, res) => {
-  try {
-    const result = db.prepare(
-      'DELETE FROM highlights WHERE id = ? AND user_id = ? AND book_id = ?'
-    ).run(req.params.hlId, req.user.id, req.params.id);
+/**
+ * DELETE /api/books/highlights/:highlightId
+ * Delete the current user's highlight.
+ */
+router.delete('/highlights/:highlightId', authenticate, (req, res) => {
+  const db = getDb();
+  const result = db
+    .prepare('DELETE FROM highlights WHERE id = ? AND user_id = ?')
+    .run(req.params.highlightId, req.user.id);
 
-    if (result.changes === 0) {
-      return res.status(404).json({ error: 'Highlight not found' });
-    }
-
-    return res.json({ message: 'Highlight deleted' });
-  } catch (err) {
-    console.error('DELETE /api/books/:id/highlights/:hlId error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+  if (result.changes === 0) {
+    return res.status(404).json({ error: 'Highlight not found' });
   }
+  res.json({ message: 'Highlight deleted' });
 });
+
+// === END OF SA-4b ROUTES ===
 
 export default router;

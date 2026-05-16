@@ -1,667 +1,598 @@
+// BiblioVault librarian admin router — book management, bulk operations,
+// version history, and user bulk actions.
+// All routes require authenticate + authorize('librarian').
+// Mount path: /api/librarian
+
 import { Router } from 'express';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
-import { randomUUID } from 'crypto';
+import { v4 as uuidv4 } from 'uuid';
 import { fileURLToPath } from 'url';
-import db from '../database.js';
+import { getDb } from '../database.js';
 import { authenticate, authorize } from '../middleware/auth.js';
+import { generateBookSummary } from '../services/llm.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const router = Router();
+const UPLOADS_DIR = path.join(__dirname, '..', 'uploads');
+const BOOKS_DIR = path.join(UPLOADS_DIR, 'books');
+const COVERS_DIR = path.join(UPLOADS_DIR, 'covers');
 
-// All routes require authentication + librarian role
-router.use(authenticate);
-router.use(authorize('librarian'));
-
-// =========================================================================
-// Constants
-// =========================================================================
-const BOOKS_UPLOAD_DIR = path.join(__dirname, '..', 'uploads', 'books');
-const COVERS_UPLOAD_DIR = path.join(__dirname, '..', 'uploads', 'covers');
-const BOOK_MAX_SIZE = 50 * 1024 * 1024;         // 50 MB
-const COVER_MAX_SIZE = 2 * 1024 * 1024;           // 2 MB
-const ALLOWED_BOOK_MIMES = [
-  'application/pdf',
-  'text/plain',
-  'application/msword',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-];
-const ALLOWED_COVER_MIMES = ['image/jpeg', 'image/png'];
-
-// =========================================================================
-// Multer configuration (for POST add book — multipart)
-// =========================================================================
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    if (file.fieldname === 'cover_image') {
-      cb(null, COVERS_UPLOAD_DIR);
-    } else {
-      cb(null, BOOKS_UPLOAD_DIR);
-    }
-  },
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname) || '';
-    cb(null, `${randomUUID()}${ext}`);
+// Ensure upload directories exist
+[BOOKS_DIR, COVERS_DIR].forEach((dir) => {
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// Multer configuration
+// ---------------------------------------------------------------------------
+const storage = multer.diskStorage({
+  destination(req, file, cb) {
+    cb(null, file.fieldname === 'cover_image' ? COVERS_DIR : BOOKS_DIR);
+  },
+  filename(req, file, cb) {
+    const ext = path.extname(file.originalname);
+    cb(null, `${uuidv4()}${ext}`);
+  },
 });
 
 const upload = multer({
   storage,
-  limits: { fileSize: BOOK_MAX_SIZE },
-  fileFilter: (req, file, cb) => {
-    const isBook = ALLOWED_BOOK_MIMES.includes(file.mimetype);
-    const isCover = ALLOWED_COVER_MIMES.includes(file.mimetype);
-    if (isBook || isCover) return cb(null, true);
-    cb(new Error('Invalid file type. Books: PDF/TXT/DOC/DOCX. Covers: JPG/PNG.'));
-  }
-});
-
-const uploadFields = upload.fields([
+  limits: { fileSize: 50 * 1024 * 1024 },
+  fileFilter(req, file, cb) {
+    if (file.fieldname === 'cover_image') {
+      if (['image/jpeg', 'image/png'].includes(file.mimetype)) return cb(null, true);
+      return cb(new Error('Invalid cover image type. Only JPG, PNG allowed.'));
+    }
+    if (['application/pdf', 'text/plain', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'].includes(file.mimetype)) {
+      return cb(null, true);
+    }
+    return cb(new Error('Invalid file type. Only PDF, TXT, DOC, DOCX allowed.'));
+  },
+}).fields([
   { name: 'file', maxCount: 1 },
-  { name: 'cover_image', maxCount: 1 }
+  { name: 'cover_image', maxCount: 1 },
 ]);
 
-// =========================================================================
-// Helper: createNotification
-// =========================================================================
-function createNotification(userId, type, title, message, priority, category, relatedId) {
-  db.prepare(`
-    INSERT INTO notifications (id, user_id, type, title, message, priority, category, related_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(randomUUID(), userId, type, title, message, priority || 'normal', category || 'general', relatedId || null);
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+function coverRelPath(filename) {
+  return `uploads/covers/${filename}`;
 }
 
-// =========================================================================
-// HELPER: Build previous-state snapshot for book_versions
-// =========================================================================
-function buildBookSnapshot(book) {
-  return {
-    title: book.title,
-    author_name: book.author_name,
-    genre: book.genre,
-    description: book.description,
-    cover_image: book.cover_image
-  };
+function resolveFilePath(storedPath) {
+  if (!storedPath) return null;
+  if (fs.existsSync(storedPath)) return storedPath;
+  const basename = path.basename(storedPath);
+  const fallback = path.join(BOOKS_DIR, basename);
+  if (fs.existsSync(fallback)) return fallback;
+  return null;
 }
 
-// =========================================================================
-// GET /api/librarian/books — all books (all statuses) with pagination
-// Filters: ?status=, ?genre=, ?search=, ?page=, ?limit=, ?sortBy=, ?sortDir=
-// =========================================================================
-router.get('/books', (req, res) => {
-  try {
-    const { status, genre, search, page, limit, sortBy, sortDir } = req.query;
-    const pageNum = parseInt(page) || 1;
-    const limitNum = parseInt(limit) || 20;
-    const offset = (pageNum - 1) * limitNum;
+function createNotification(db, userId, type, title, message, priority, category, relatedId) {
+  if (!userId) return;
+  const id = uuidv4();
+  db.prepare(
+    `INSERT INTO notifications (id, user_id, type, title, message, priority, category, related_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(id, userId, type, title, message, priority || 'normal', category || 'general', relatedId || null);
+}
 
-    const whereClauses = [];
-    const params = [];
+// ---------------------------------------------------------------------------
+// GET /api/librarian/books — List all non-draft books with filters
+// Query: ?status=, ?genre=, ?search=, ?page=, ?limit=
+// ---------------------------------------------------------------------------
+router.get('/books', authenticate, authorize('librarian'), (req, res) => {
+  const db = getDb();
+  const search = (req.query.search || '').trim();
+  const status = (req.query.status || '').trim();
+  const genre = (req.query.genre || '').trim();
+  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
+  const offset = (page - 1) * limit;
 
-    if (status) {
-      whereClauses.push('b.status = ?');
-      params.push(status);
-    }
-    if (genre) {
-      whereClauses.push('b.genre LIKE ?');
-      params.push(`%${genre}%`);
-    }
-    if (search) {
-      whereClauses.push('(b.title LIKE ? OR b.author_name LIKE ?)');
-      const term = `%${search}%`;
-      params.push(term, term);
-    }
+  let where = "WHERE b.status != 'draft'";
+  const params = [];
 
-    const whereSQL = whereClauses.length ? `WHERE ${whereClauses.join(' AND ')}` : '';
-
-    // Count
-    const countRow = db.prepare(`SELECT COUNT(*) AS total FROM books b ${whereSQL}`).get(...params);
-
-    // Sort — whitelist to prevent SQL injection
-    const allowedSorts = ['title', 'author_name', 'genre', 'status', 'publish_date', 'submitted_date', 'times_borrowed'];
-    const sortColumn = allowedSorts.includes(sortBy) ? sortBy : 'submitted_date';
-    const sortDirection = sortDir === 'ASC' ? 'ASC' : 'DESC';
-
-    const books = db.prepare(`
-      SELECT b.*, u.username AS author_username
-      FROM books b
-      JOIN users u ON b.author_id = u.id
-      ${whereSQL}
-      ORDER BY b.${sortColumn} ${sortDirection}
-      LIMIT ? OFFSET ?
-    `).all(...params, limitNum, offset);
-
-    const result = books.map(b => ({
-      ...b,
-      cover_image: b.cover_image ? `/${b.cover_image}` : null
-    }));
-
-    return res.json({
-      books: result,
-      total: countRow.total,
-      page: pageNum,
-      limit: limitNum
-    });
-  } catch (err) {
-    console.error('GET /api/librarian/books error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+  if (search) {
+    where += ' AND (b.title LIKE ? OR b.author_name LIKE ?)';
+    params.push(`%${search}%`, `%${search}%`);
   }
+  if (status) {
+    where += ' AND b.status = ?';
+    params.push(status);
+  }
+  if (genre) {
+    where += ' AND b.genre LIKE ?';
+    params.push(`%${genre}%`);
+  }
+
+  const countRow = db
+    .prepare(`SELECT COUNT(*) AS total FROM books b ${where}`)
+    .get(...params);
+
+  const books = db
+    .prepare(
+      `SELECT
+         b.id, b.title, b.author_id, b.author_name, b.genre, b.description,
+         b.cover_image, b.status, b.availability, b.file_name,
+         b.publish_date, b.submitted_date, b.times_borrowed,
+         u.username AS author_username, u.full_name AS author_full_name,
+         COALESCE(AVG(r.rating), 0) AS average_rating,
+         COUNT(DISTINCT r.id) AS review_count
+       FROM books b
+       JOIN users u ON b.author_id = u.id
+       LEFT JOIN reviews r ON r.book_id = b.id AND (r.flagged = 0 OR r.flagged IS NULL)
+       ${where}
+       GROUP BY b.id
+       ORDER BY b.submitted_date DESC
+       LIMIT ? OFFSET ?`
+    )
+    .all(...params, limit, offset);
+
+  const formattedBooks = books.map((b) => ({
+    ...b,
+    average_rating: Number(b.average_rating),
+    review_count: Number(b.review_count),
+  }));
+
+  res.json({
+    books: formattedBooks,
+    pagination: {
+      page,
+      limit,
+      total: countRow.total,
+      total_pages: Math.ceil(countRow.total / limit),
+    },
+  });
 });
 
-// =========================================================================
-// POST /api/librarian/books — add a book directly (approved immediately)
-// Multipart: title, author_name, genre, description, file (book), cover_image (optional)
-// =========================================================================
-router.post('/books', (req, res, next) => {
-  uploadFields(req, res, (err) => {
+// ---------------------------------------------------------------------------
+// POST /api/librarian/books — Add a new book directly (approved immediately)
+// Multipart: title, author_name, genre, description, file, cover_image(optional), generate_summary?
+// If generate_summary='true' and DASHSCOPE_API_KEY set: LLM generates description
+// Creates book_versions entry for the initial version
+// ---------------------------------------------------------------------------
+router.post('/books', authenticate, authorize('librarian'), (req, res) => {
+  upload(req, res, async (err) => {
     if (err) {
       if (err.code === 'LIMIT_FILE_SIZE') {
-        return res.status(400).json({ error: 'File too large. Maximum size is 50MB.' });
+        return res.status(413).json({ error: 'File too large. Maximum size is 50MB.' });
       }
       return res.status(400).json({ error: err.message });
     }
 
-    try {
-      const { title, author_name, genre, description } = req.body;
+    const { title, author_name, genre, description, generate_summary } = req.body;
+    const bookFile = req.files && req.files.file && req.files.file[0];
 
-      // Validate required fields
-      if (!title || typeof title !== 'string' || title.trim().length === 0) {
-        return res.status(400).json({ error: 'Title is required' });
-      }
-      if (!genre || typeof genre !== 'string' || genre.trim().length === 0) {
-        return res.status(400).json({ error: 'Genre is required' });
-      }
-      if (!description || typeof description !== 'string' || description.trim().length < 20) {
-        return res.status(400).json({ error: 'Description must be at least 20 characters' });
-      }
-      if (!req.files || !req.files.file || req.files.file.length === 0) {
-        return res.status(400).json({ error: 'Book file is required' });
-      }
+    if (!title || !title.trim()) {
+      return res.status(400).json({ error: 'Title is required' });
+    }
+    if (!author_name || !author_name.trim()) {
+      return res.status(400).json({ error: 'Author name is required' });
+    }
+    if (!genre || !genre.trim()) {
+      return res.status(400).json({ error: 'Genre is required' });
+    }
 
-      // Validate cover file size if provided
-      if (req.files.cover_image && req.files.cover_image.length > 0) {
-        const coverFile = req.files.cover_image[0];
-        if (coverFile.size > COVER_MAX_SIZE) {
-          fs.unlinkSync(coverFile.path);
-          return res.status(400).json({ error: 'Cover image too large. Maximum size is 2MB.' });
+    let finalDescription = (description || '').trim();
+
+    // If no description but generate_summary is requested, try LLM
+    if ((!finalDescription || generate_summary === 'true') && bookFile) {
+      try {
+        const llmSummary = await generateBookSummary(
+          title.trim(),
+          genre.trim(),
+          '',
+          'medium'
+        );
+        if (llmSummary) {
+          finalDescription = llmSummary;
         }
+      } catch (llmErr) {
+        console.error('LLM summary generation failed:', llmErr.message);
+        // Fall through — use whatever description we have
       }
+    }
 
-      const bookFile = req.files.file[0];
-      const id = randomUUID();
-      const filePath = bookFile.path;
-      const fileName = bookFile.originalname;
-      const coverImage = req.files.cover_image && req.files.cover_image.length > 0
-        ? `uploads/covers/${req.files.cover_image[0].filename}`
+    if (!finalDescription) {
+      finalDescription = `Book by ${author_name.trim()}.`;
+    }
+    if (finalDescription.length < 20) {
+      finalDescription = finalDescription + ' Added to the library catalog.';
+    }
+
+    const db = getDb();
+    const bookId = uuidv4();
+    const coverImage =
+      req.files && req.files.cover_image && req.files.cover_image[0]
+        ? coverRelPath(req.files.cover_image[0].filename)
         : null;
 
-      const authorName = (author_name || req.user.full_name || '').trim();
+    try {
+      const run = db.transaction(() => {
+        db.prepare(
+          `INSERT INTO books (id, title, author_id, author_name, genre, description,
+             file_path, file_name, status, availability, cover_image, publish_date)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'approved', 'available', ?, datetime('now'))`
+        ).run(
+          bookId,
+          title.trim(),
+          req.user.id,
+          author_name.trim(),
+          genre.trim(),
+          finalDescription,
+          bookFile ? bookFile.path : null,
+          bookFile ? bookFile.originalname : null,
+          coverImage
+        );
 
-      let versionId;
-
-      const tx = db.transaction(() => {
-        db.prepare(`
-          INSERT INTO books (id, title, author_id, author_name, genre, description,
-                             file_path, file_name, status, availability, cover_image, publish_date)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'approved', 'available', ?, datetime('now'))
-        `).run(id, title.trim(), req.user.id, authorName,
-               genre.trim(), description.trim(), filePath, fileName, coverImage);
-
-        // Create initial book_version entry
-        versionId = randomUUID();
+        // Create initial book_versions entry
+        const versionId = uuidv4();
         const changes = JSON.stringify({
-          previous: {},
-          current: {
-            title: title.trim(),
-            author_name: authorName,
-            genre: genre.trim(),
-            description: description.trim()
-          }
+          title: { new: title.trim() },
+          author_name: { new: author_name.trim() },
+          genre: { new: genre.trim() },
+          description: { new: finalDescription },
+          action: 'created',
         });
-        db.prepare(`
-          INSERT INTO book_versions (id, book_id, changed_by, changes)
-          VALUES (?, ?, ?, ?)
-        `).run(versionId, id, req.user.id, changes);
+        db.prepare(
+          `INSERT INTO book_versions (id, book_id, changed_by, changes)
+           VALUES (?, ?, ?, ?)`
+        ).run(versionId, bookId, req.user.id, changes);
       });
 
-      tx();
+      run();
 
-      const book = db.prepare('SELECT * FROM books WHERE id = ?').get(id);
-
-      // Notification: librarian created the book directly — skip author notification
-      // (the librarian is the author_id; no external "original author" to notify)
-
-      return res.status(201).json({
-        message: 'Book added successfully',
-        book: {
-          id: book.id,
-          title: book.title,
-          status: book.status,
-          cover_image: book.cover_image ? `/${book.cover_image}` : null
-        },
-        version_id: versionId
-      });
-    } catch (err) {
-      console.error('POST /api/librarian/books error:', err);
-      return res.status(500).json({ error: 'Internal server error' });
+      const book = db.prepare('SELECT * FROM books WHERE id = ?').get(bookId);
+      res.status(201).json(book);
+    } catch (dbErr) {
+      console.error('Librarian add book error:', dbErr.message);
+      if (bookFile && fs.existsSync(bookFile.path)) {
+        try { fs.unlinkSync(bookFile.path); } catch (e) { /* ignore */ }
+      }
+      res.status(500).json({ error: 'Failed to add book' });
     }
   });
 });
 
-// =========================================================================
-// PUT /api/librarian/books/:id — edit any book; creates book_versions row
+// ---------------------------------------------------------------------------
+// PUT /api/librarian/books/:id — Edit any book
+// Creates book_versions row before saving
 // Body: { title?, author_name?, genre?, description?, cover_image? }
-// =========================================================================
-router.put('/books/:id', (req, res) => {
-  try {
+// Accepts multipart for file/cover replacement
+// ---------------------------------------------------------------------------
+router.put('/books/:id', authenticate, authorize('librarian'), (req, res) => {
+  upload(req, res, (err) => {
+    if (err) {
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(413).json({ error: 'File too large. Maximum size is 50MB.' });
+      }
+      return res.status(400).json({ error: err.message });
+    }
+
+    const db = getDb();
     const book = db.prepare('SELECT * FROM books WHERE id = ?').get(req.params.id);
+
     if (!book) {
       return res.status(404).json({ error: 'Book not found' });
     }
 
-    const { title, author_name, genre, description, cover_image } = req.body;
+    const { title, author_name, genre, description } = req.body;
 
-    // Build update fields
-    const updates = [];
-    const params = [];
-    const snapshot = buildBookSnapshot(book);
+    const newTitle = title !== undefined ? title.trim() : book.title;
+    const newAuthorName = author_name !== undefined ? author_name.trim() : book.author_name;
+    const newGenre = genre !== undefined ? genre.trim() : book.genre;
+    const newDescription = description !== undefined ? description.trim() : book.description;
 
-    if (title !== undefined) {
-      if (typeof title !== 'string' || title.trim().length === 0) {
-        return res.status(400).json({ error: 'Title cannot be empty' });
+    // Build changes JSON
+    const changes = {};
+    if (newTitle !== book.title) changes.title = { old: book.title, new: newTitle };
+    if (newAuthorName !== book.author_name) changes.author_name = { old: book.author_name, new: newAuthorName };
+    if (newGenre !== book.genre) changes.genre = { old: book.genre, new: newGenre };
+    if (newDescription !== book.description) changes.description = { old: book.description, new: newDescription };
+
+    // Handle cover replacement
+    let newCoverImage = book.cover_image;
+    if (req.files && req.files.cover_image && req.files.cover_image[0]) {
+      newCoverImage = coverRelPath(req.files.cover_image[0].filename);
+      changes.cover_image = { old: book.cover_image, new: newCoverImage };
+      // Delete old cover file
+      if (book.cover_image) {
+        const oldCover = path.join(UPLOADS_DIR, book.cover_image);
+        if (fs.existsSync(oldCover)) {
+          try { fs.unlinkSync(oldCover); } catch (e) { /* ignore */ }
+        }
       }
-      updates.push('title = ?');
-      params.push(title.trim());
     }
-    if (author_name !== undefined) {
-      updates.push('author_name = ?');
-      params.push(author_name.trim());
-    }
-    if (genre !== undefined) {
-      if (typeof genre !== 'string' || genre.trim().length === 0) {
-        return res.status(400).json({ error: 'Genre cannot be empty' });
+
+    // Handle file replacement
+    let newFilePath = book.file_path;
+    let newFileName = book.file_name;
+    if (req.files && req.files.file && req.files.file[0]) {
+      newFilePath = req.files.file[0].path;
+      newFileName = req.files.file[0].originalname;
+      changes.file = { old: book.file_name, new: newFileName };
+      // Delete old book file
+      if (book.file_path && fs.existsSync(book.file_path)) {
+        try { fs.unlinkSync(book.file_path); } catch (e) { /* ignore */ }
       }
-      updates.push('genre = ?');
-      params.push(genre.trim());
-    }
-    if (description !== undefined) {
-      if (typeof description !== 'string' || description.trim().length < 20) {
-        return res.status(400).json({ error: 'Description must be at least 20 characters' });
-      }
-      updates.push('description = ?');
-      params.push(description.trim());
-    }
-    if (cover_image !== undefined) {
-      updates.push('cover_image = ?');
-      params.push(cover_image || null);
     }
 
-    if (updates.length === 0) {
-      return res.status(400).json({ error: 'No fields to update' });
-    }
+    try {
+      const run = db.transaction(() => {
+        db.prepare(
+          `UPDATE books
+           SET title = ?, author_name = ?, genre = ?, description = ?,
+               cover_image = ?, file_path = ?, file_name = ?
+           WHERE id = ?`
+        ).run(newTitle, newAuthorName, newGenre, newDescription, newCoverImage, newFilePath, newFileName, req.params.id);
 
-    // Build current snapshot before applying update
-    const currentSnapshot = { ...snapshot };
-    if (title !== undefined) currentSnapshot.title = title.trim();
-    if (author_name !== undefined) currentSnapshot.author_name = author_name.trim();
-    if (genre !== undefined) currentSnapshot.genre = genre.trim();
-    if (description !== undefined) currentSnapshot.description = description.trim();
-    if (cover_image !== undefined) currentSnapshot.cover_image = cover_image || null;
+        // Record version history
+        if (Object.keys(changes).length > 0) {
+          const versionId = uuidv4();
+          db.prepare(
+            `INSERT INTO book_versions (id, book_id, changed_by, changes)
+             VALUES (?, ?, ?, ?)`
+          ).run(versionId, req.params.id, req.user.id, JSON.stringify(changes));
+        }
 
-    let versionId;
-
-    const tx = db.transaction(() => {
-      params.push(book.id);
-      db.prepare(`UPDATE books SET ${updates.join(', ')} WHERE id = ?`).run(...params);
-
-      // Create book_versions entry
-      versionId = randomUUID();
-      const changes = JSON.stringify({
-        previous: snapshot,
-        current: currentSnapshot
+        // Notify the original author if different from librarian
+        if (book.author_id !== req.user.id) {
+          createNotification(
+            db,
+            book.author_id,
+            'book_edited',
+            'Book Edited',
+            `Your book "${newTitle}" has been edited by a librarian.`,
+            'normal',
+            'submissions',
+            req.params.id
+          );
+        }
       });
-      db.prepare(`
-        INSERT INTO book_versions (id, book_id, changed_by, changes)
-        VALUES (?, ?, ?, ?)
-      `).run(versionId, book.id, req.user.id, changes);
-    });
 
-    tx();
+      run();
 
-    const updated = db.prepare('SELECT * FROM books WHERE id = ?').get(book.id);
-
-    // Notify the book's author about the edit
-    if (book.author_id !== req.user.id) {
-      createNotification(book.author_id, 'book_edited', 'Book Edited',
-        `Your book "${book.title}" has been edited by a librarian.`,
-        'normal', 'general', book.id);
+      const updated = db.prepare('SELECT * FROM books WHERE id = ?').get(req.params.id);
+      res.json(updated);
+    } catch (dbErr) {
+      console.error('Librarian edit error:', dbErr.message);
+      res.status(500).json({ error: 'Failed to update book' });
     }
-
-    return res.json({
-      message: 'Book updated successfully',
-      book: {
-        id: updated.id,
-        title: updated.title,
-        status: updated.status,
-        cover_image: updated.cover_image ? `/${updated.cover_image}` : null
-      },
-      version_id: versionId
-    });
-  } catch (err) {
-    console.error('PUT /api/librarian/books/:id error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
-  }
+  });
 });
 
-// =========================================================================
-// DELETE /api/librarian/books/:id — hard delete any book (bypasses two-phase)
-// Cascade order per architecture spec §7
-// =========================================================================
-router.delete('/books/:id', (req, res) => {
+// ---------------------------------------------------------------------------
+// DELETE /api/librarian/books/:id — Hard delete a book with full cascade
+// ---------------------------------------------------------------------------
+router.delete('/books/:id', authenticate, authorize('librarian'), (req, res) => {
+  const db = getDb();
+  const book = db.prepare('SELECT * FROM books WHERE id = ?').get(req.params.id);
+
+  if (!book) {
+    return res.status(404).json({ error: 'Book not found' });
+  }
+
+  const bookTitle = book.title;
+  const bookId = book.id;
+
   try {
-    const book = db.prepare('SELECT * FROM books WHERE id = ?').get(req.params.id);
-    if (!book) {
-      return res.status(404).json({ error: 'Book not found' });
-    }
-
-    const bookId = book.id;
-
-    const tx = db.transaction(() => {
-      // 1. Bookmarks
+    const run = db.transaction(() => {
+      // Cascade delete
       db.prepare('DELETE FROM bookmarks WHERE book_id = ?').run(bookId);
-      // 2. Highlights
       db.prepare('DELETE FROM highlights WHERE book_id = ?').run(bookId);
-      // 3. Reading progress
       db.prepare('DELETE FROM reading_progress WHERE book_id = ?').run(bookId);
-      // 4. Book versions
       db.prepare('DELETE FROM book_versions WHERE book_id = ?').run(bookId);
-      // 5. Downloaded books
       db.prepare('DELETE FROM downloaded_books WHERE book_id = ?').run(bookId);
-      // 6. Review replies + reviews
-      const reviewIds = db.prepare('SELECT id FROM reviews WHERE book_id = ?').all(bookId).map(r => r.id);
-      if (reviewIds.length > 0) {
-        const rPlaceholders = reviewIds.map(() => '?').join(',');
-        db.prepare(`DELETE FROM review_replies WHERE review_id IN (${rPlaceholders})`).run(...reviewIds);
-        db.prepare(`DELETE FROM reviews WHERE book_id = ?`).run(bookId);
+
+      // Delete review replies for reviews of this book
+      const reviewIds = db.prepare('SELECT id FROM reviews WHERE book_id = ?').all(bookId);
+      for (const rev of reviewIds) {
+        db.prepare('DELETE FROM review_replies WHERE review_id = ?').run(rev.id);
       }
-      // 7. Notifications related to this book
+      db.prepare('DELETE FROM reviews WHERE book_id = ?').run(bookId);
+
+      // Delete related notifications
       db.prepare('DELETE FROM notifications WHERE related_id = ?').run(bookId);
-      // 8. Borrow records
+
       db.prepare('DELETE FROM borrow_records WHERE book_id = ?').run(bookId);
-      // 9. Delete book row
       db.prepare('DELETE FROM books WHERE id = ?').run(bookId);
     });
 
-    tx();
+    run();
 
-    // Delete files from disk (outside transaction)
-    try {
-      if (book.file_path && fs.existsSync(book.file_path)) {
-        fs.unlinkSync(book.file_path);
+    // Delete files from disk
+    if (book.file_path && fs.existsSync(book.file_path)) {
+      try { fs.unlinkSync(book.file_path); } catch (e) { /* ignore */ }
+    }
+    if (book.cover_image) {
+      const coverPath = path.join(UPLOADS_DIR, book.cover_image);
+      if (fs.existsSync(coverPath)) {
+        try { fs.unlinkSync(coverPath); } catch (e) { /* ignore */ }
       }
-      if (book.cover_image) {
-        const coverPath = path.join(__dirname, '..', book.cover_image);
-        if (fs.existsSync(coverPath)) fs.unlinkSync(coverPath);
-      }
-    } catch (fileErr) {
-      console.error('Error deleting book files:', fileErr);
     }
 
-    // Notify author
-    if (book.author_id !== req.user.id) {
-      createNotification(book.author_id, 'book_deleted', 'Book Deleted',
-        `Your book "${book.title}" has been permanently deleted by a librarian.`,
-        'normal', 'general', bookId);
-    }
-
-    // Notify all active borrowers
-    const activeBorrowers = db.prepare(
-      "SELECT user_id FROM borrow_records WHERE book_id = ? AND status = 'active'"
-    ).all(bookId);
-    for (const borrower of activeBorrowers) {
-      createNotification(borrower.user_id, 'book_deleted', 'Book Deleted',
-        `The book "${book.title}" you borrowed has been permanently deleted.`,
-        'urgent', 'general', bookId);
-    }
-
-    return res.json({ message: 'Book permanently deleted' });
-  } catch (err) {
-    console.error('DELETE /api/librarian/books/:id error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+    res.json({ message: `Book "${bookTitle}" permanently deleted.` });
+  } catch (dbErr) {
+    console.error('Librarian delete error:', dbErr.message);
+    res.status(500).json({ error: 'Failed to delete book' });
   }
 });
 
-// =========================================================================
-// POST /api/librarian/books/bulk-delete — atomic hard delete for multiple books
-// Body: { bookIds: [] }
-// =========================================================================
-router.post('/books/bulk-delete', (req, res) => {
-  try {
-    const { bookIds } = req.body;
+// ---------------------------------------------------------------------------
+// POST /api/librarian/books/bulk-delete — Bulk hard delete
+// Body: { book_ids: [] }
+// Atomic: all or nothing within the transaction
+// ---------------------------------------------------------------------------
+router.post('/books/bulk-delete', authenticate, authorize('librarian'), (req, res) => {
+  const db = getDb();
+  const { book_ids } = req.body;
 
-    if (!bookIds || !Array.isArray(bookIds) || bookIds.length === 0) {
-      return res.status(400).json({ error: 'bookIds array is required' });
-    }
+  if (!book_ids || !Array.isArray(book_ids) || book_ids.length === 0) {
+    return res.status(400).json({ error: 'book_ids array is required' });
+  }
 
-    // Prevent SQL injection by building placeholders
-    const placeholders = bookIds.map(() => '?').join(',');
+  let succeeded = 0;
+  let failed = 0;
+  const errors = [];
 
-    // Gather books first for notifications and file cleanup
-    const books = db.prepare(`
-      SELECT id, title, author_id, file_path, cover_image FROM books WHERE id IN (${placeholders})
-    `).all(...bookIds);
-
-    if (books.length === 0) {
-      return res.status(404).json({ error: 'No books found for the given IDs' });
-    }
-
-    const actualIds = books.map(b => b.id);
-
-    const tx = db.transaction(() => {
-      // 1. Bookmarks
-      db.prepare(`DELETE FROM bookmarks WHERE book_id IN (${placeholders})`).run(...actualIds);
-      // 2. Highlights
-      db.prepare(`DELETE FROM highlights WHERE book_id IN (${placeholders})`).run(...actualIds);
-      // 3. Reading progress
-      db.prepare(`DELETE FROM reading_progress WHERE book_id IN (${placeholders})`).run(...actualIds);
-      // 4. Book versions
-      db.prepare(`DELETE FROM book_versions WHERE book_id IN (${placeholders})`).run(...actualIds);
-      // 5. Downloaded books
-      db.prepare(`DELETE FROM downloaded_books WHERE book_id IN (${placeholders})`).run(...actualIds);
-      // 6. Review replies + reviews
-      for (const bid of actualIds) {
-        const reviewIds = db.prepare('SELECT id FROM reviews WHERE book_id = ?').all(bid).map(r => r.id);
-        if (reviewIds.length > 0) {
-          const rp = reviewIds.map(() => '?').join(',');
-          db.prepare(`DELETE FROM review_replies WHERE review_id IN (${rp})`).run(...reviewIds);
-          db.prepare('DELETE FROM reviews WHERE book_id = ?').run(bid);
-        }
-      }
-      // 7. Notifications related to these books
-      db.prepare(`DELETE FROM notifications WHERE related_id IN (${placeholders})`).run(...actualIds);
-      // 8. Borrow records
-      db.prepare(`DELETE FROM borrow_records WHERE book_id IN (${placeholders})`).run(...actualIds);
-      // 9. Delete book rows
-      db.prepare(`DELETE FROM books WHERE id IN (${placeholders})`).run(...actualIds);
-    });
-
-    tx();
-
-    // Delete files from disk (outside transaction)
-    for (const book of books) {
+  const run = db.transaction(() => {
+    for (const bookId of book_ids) {
       try {
+        const book = db.prepare('SELECT * FROM books WHERE id = ?').get(bookId);
+        if (!book) {
+          failed++;
+          errors.push(`Book ${bookId} not found`);
+          continue;
+        }
+
+        // Full cascade
+        db.prepare('DELETE FROM bookmarks WHERE book_id = ?').run(bookId);
+        db.prepare('DELETE FROM highlights WHERE book_id = ?').run(bookId);
+        db.prepare('DELETE FROM reading_progress WHERE book_id = ?').run(bookId);
+        db.prepare('DELETE FROM book_versions WHERE book_id = ?').run(bookId);
+        db.prepare('DELETE FROM downloaded_books WHERE book_id = ?').run(bookId);
+
+        const reviewIds = db.prepare('SELECT id FROM reviews WHERE book_id = ?').all(bookId);
+        for (const rev of reviewIds) {
+          db.prepare('DELETE FROM review_replies WHERE review_id = ?').run(rev.id);
+        }
+        db.prepare('DELETE FROM reviews WHERE book_id = ?').run(bookId);
+        db.prepare('DELETE FROM notifications WHERE related_id = ?').run(bookId);
+        db.prepare('DELETE FROM borrow_records WHERE book_id = ?').run(bookId);
+        db.prepare('DELETE FROM books WHERE id = ?').run(bookId);
+
+        // Delete files
         if (book.file_path && fs.existsSync(book.file_path)) {
-          fs.unlinkSync(book.file_path);
+          try { fs.unlinkSync(book.file_path); } catch (e) { /* ignore */ }
         }
         if (book.cover_image) {
-          const coverPath = path.join(__dirname, '..', book.cover_image);
-          if (fs.existsSync(coverPath)) fs.unlinkSync(coverPath);
+          const coverPath = path.join(UPLOADS_DIR, book.cover_image);
+          if (fs.existsSync(coverPath)) {
+            try { fs.unlinkSync(coverPath); } catch (e) { /* ignore */ }
+          }
         }
-      } catch (fileErr) {
-        console.error('Error deleting file for book', book.id, fileErr);
-      }
 
-      // Notify author
-      if (book.author_id !== req.user.id) {
-        createNotification(book.author_id, 'book_deleted', 'Book Deleted',
-          `Your book "${book.title}" has been permanently deleted by a librarian.`,
-          'normal', 'general', book.id);
-      }
-
-      // Notify active borrowers
-      const activeBorrowers = db.prepare(
-        "SELECT user_id FROM borrow_records WHERE book_id = ? AND status = 'active'"
-      ).all(book.id);
-      for (const borrower of activeBorrowers) {
-        createNotification(borrower.user_id, 'book_deleted', 'Book Deleted',
-          `The book "${book.title}" you borrowed has been permanently deleted.`,
-          'urgent', 'general', book.id);
+        succeeded++;
+      } catch (err) {
+        failed++;
+        errors.push(err.message);
       }
     }
+  });
 
-    return res.json({ message: 'Books permanently deleted', deleted: books.length });
-  } catch (err) {
-    console.error('POST /api/librarian/books/bulk-delete error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// =========================================================================
-// GET /api/librarian/books/:id/versions — version history for a book
-// =========================================================================
-router.get('/books/:id/versions', (req, res) => {
   try {
-    const book = db.prepare('SELECT id, title FROM books WHERE id = ?').get(req.params.id);
-    if (!book) {
-      return res.status(404).json({ error: 'Book not found' });
-    }
-
-    const versions = db.prepare(`
-      SELECT bv.id, bv.book_id, bv.changed_by, bv.changes, bv.created_at,
-             u.username AS changed_by_username
-      FROM book_versions bv
-      JOIN users u ON bv.changed_by = u.id
-      WHERE bv.book_id = ?
-      ORDER BY bv.created_at DESC
-    `).all(req.params.id);
-
-    // Parse JSON changes for each version
-    const parsedVersions = versions.map(v => ({
-      ...v,
-      changes: JSON.parse(v.changes)
-    }));
-
-    return res.json({ versions: parsedVersions });
-  } catch (err) {
-    console.error('GET /api/librarian/books/:id/versions error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// =========================================================================
-// GET /api/librarian/users — list all users with pagination + filters
-// ?role=, ?search=, ?page=, ?limit=
-// =========================================================================
-router.get('/users', (req, res) => {
-  try {
-    const page = Math.max(1, parseInt(req.query.page) || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
-    const offset = (page - 1) * limit;
-    const { role, search } = req.query;
-
-    let where = 'WHERE 1=1';
-    const params = [];
-
-    if (role) {
-      where += ' AND role = ?';
-      params.push(role);
-    }
-
-    if (search) {
-      where += ' AND (username LIKE ? OR full_name LIKE ?)';
-      params.push(`%${search}%`, `%${search}%`);
-    }
-
-    const countRow = db.prepare(`SELECT COUNT(*) AS total FROM users ${where}`).get(...params);
-
-    const users = db.prepare(`
-      SELECT id, username, full_name, role, bio, employee_id,
-             profile_picture, active, created_at, last_login
-      FROM users ${where}
-      ORDER BY created_at DESC
-      LIMIT ? OFFSET ?
-    `).all(...params, limit, offset);
-
-    return res.json({ users, total: countRow.total, page, limit });
-  } catch (err) {
-    console.error('GET /api/librarian/users error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// =========================================================================
-// POST /api/librarian/users/bulk-action
-// Body: { action: 'activate'|'deactivate'|'change-role', user_ids: [], role? }
-// =========================================================================
-router.post('/users/bulk-action', (req, res) => {
-  try {
-    const { action, user_ids, role: newRole } = req.body;
-
-    if (!action || !['activate', 'deactivate', 'change-role'].includes(action)) {
-      return res.status(400).json({ error: 'Action must be one of: activate, deactivate, change-role' });
-    }
-
-    if (!Array.isArray(user_ids) || user_ids.length === 0) {
-      return res.status(400).json({ error: 'user_ids must be a non-empty array' });
-    }
-
-    // Prevent self-deactivation or self-role-change
-    if (action === 'deactivate' && user_ids.includes(req.user.id)) {
-      return res.status(400).json({ error: 'Cannot deactivate yourself' });
-    }
-    if (action === 'change-role' && user_ids.includes(req.user.id)) {
-      return res.status(400).json({ error: 'Cannot change your own role' });
-    }
-
-    if (action === 'change-role') {
-      if (!newRole || !['student', 'staff', 'author', 'librarian'].includes(newRole)) {
-        return res.status(400).json({ error: 'Valid role is required for change-role action' });
-      }
-
-      const stmt = db.prepare('UPDATE users SET role = ? WHERE id = ?');
-      const tx = db.transaction(() => {
-        for (const uid of user_ids) {
-          stmt.run(newRole, uid);
-        }
-      });
-      tx();
-
-      return res.json({
-        message: `${user_ids.length} user(s) role changed to ${newRole}`,
-        affected: user_ids.length
-      });
-    }
-
-    // activate or deactivate
-    const newActive = action === 'activate' ? 1 : 0;
-    const stmt = db.prepare('UPDATE users SET active = ? WHERE id = ?');
-    const tx = db.transaction(() => {
-      for (const uid of user_ids) {
-        stmt.run(newActive, uid);
-      }
-    });
-    tx();
-
-    return res.json({
-      message: `${user_ids.length} user(s) ${action}d successfully`,
-      affected: user_ids.length
+    run();
+    res.json({
+      message: `Bulk delete completed. ${succeeded} deleted, ${failed} failed.`,
+      results: { succeeded, failed, errors },
     });
   } catch (err) {
-    console.error('POST /api/librarian/users/bulk-action error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+    console.error('Bulk delete error:', err.message);
+    res.status(500).json({ error: 'Bulk delete failed' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/librarian/books/:id/versions — Version history for a book
+// ---------------------------------------------------------------------------
+router.get('/books/:id/versions', authenticate, authorize('librarian'), (req, res) => {
+  const db = getDb();
+
+  const book = db.prepare('SELECT id, title FROM books WHERE id = ?').get(req.params.id);
+  if (!book) {
+    return res.status(404).json({ error: 'Book not found' });
+  }
+
+  const versions = db
+    .prepare(
+      `SELECT bv.*, u.username AS changed_by_username
+       FROM book_versions bv
+       JOIN users u ON bv.changed_by = u.id
+       WHERE bv.book_id = ?
+       ORDER BY bv.created_at DESC`
+    )
+    .all(req.params.id);
+
+  // Parse changes JSON for each version
+  const parsed = versions.map((v) => ({
+    ...v,
+    changes: (() => {
+      try { return JSON.parse(v.changes); } catch (e) { return v.changes; }
+    })(),
+  }));
+
+  res.json({ book, versions: parsed });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/librarian/users/bulk-action — Bulk user management
+// Body: { action: 'deactivate'|'activate'|'change-role', user_ids: [], role? }
+// ---------------------------------------------------------------------------
+router.post('/users/bulk-action', authenticate, authorize('librarian'), (req, res) => {
+  const db = getDb();
+  const { action, user_ids, role } = req.body;
+
+  if (!action || !user_ids || !Array.isArray(user_ids) || user_ids.length === 0) {
+    return res.status(400).json({ error: 'action and user_ids are required' });
+  }
+
+  if (!['deactivate', 'activate', 'change-role'].includes(action)) {
+    return res.status(400).json({ error: 'Invalid action. Must be deactivate, activate, or change-role.' });
+  }
+
+  if (action === 'change-role' && !role) {
+    return res.status(400).json({ error: 'role is required for change-role action' });
+  }
+
+  // Cannot deactivate self
+  if (action === 'deactivate' && user_ids.includes(req.user.id)) {
+    return res.status(400).json({ error: 'You cannot deactivate yourself' });
+  }
+
+  let succeeded = 0;
+  let failed = 0;
+  const errors = [];
+
+  const run = db.transaction(() => {
+    for (const userId of user_ids) {
+      try {
+        if (action === 'deactivate') {
+          if (userId === req.user.id) {
+            failed++;
+            errors.push('Cannot deactivate self');
+            continue;
+          }
+          db.prepare("UPDATE users SET active = 0 WHERE id = ?").run(userId);
+        } else if (action === 'activate') {
+          db.prepare("UPDATE users SET active = 1 WHERE id = ?").run(userId);
+        } else if (action === 'change-role') {
+          db.prepare("UPDATE users SET role = ? WHERE id = ?").run(role, userId);
+        }
+        succeeded++;
+      } catch (err) {
+        failed++;
+        errors.push(err.message);
+      }
+    }
+  });
+
+  try {
+    run();
+    res.json({
+      message: `Bulk ${action} completed. ${succeeded} succeeded, ${failed} failed.`,
+      results: { succeeded, failed, errors },
+    });
+  } catch (err) {
+    console.error('Bulk user action error:', err.message);
+    res.status(500).json({ error: 'Bulk action failed' });
   }
 });
 

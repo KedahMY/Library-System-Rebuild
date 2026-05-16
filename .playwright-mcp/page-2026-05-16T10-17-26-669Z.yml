@@ -1,0 +1,136 @@
+- generic [ref=e3]:
+  - generic [ref=e4]:
+    - generic [ref=e5]: BiblioVault
+    - generic [ref=e6]: Librarian
+    - navigation [ref=e7]:
+      - button "⏳ Pending Submissions" [ref=e8] [cursor=pointer]:
+        - generic [ref=e9]: ⏳
+        - generic [ref=e10]: Pending Submissions
+      - button "📋 All Submissions" [ref=e11] [cursor=pointer]:
+        - generic [ref=e12]: 📋
+        - generic [ref=e13]: All Submissions
+      - button "📚 Manage Books" [ref=e14] [cursor=pointer]:
+        - generic [ref=e15]: 📚
+        - generic [ref=e16]: Manage Books
+      - button "📨 Book Requests" [ref=e17] [cursor=pointer]:
+        - generic [ref=e18]: 📨
+        - generic [ref=e19]: Book Requests
+      - button "📊 Downloaded Stats" [ref=e20] [cursor=pointer]:
+        - generic [ref=e21]: 📊
+        - generic [ref=e22]: Downloaded Stats
+      - button "🚩 Flagged Reviews" [ref=e23] [cursor=pointer]:
+        - generic [ref=e24]: 🚩
+        - generic [ref=e25]: Flagged Reviews
+      - button "👥 Manage Users" [active] [ref=e26] [cursor=pointer]:
+        - generic [ref=e27]: 👥
+        - generic [ref=e28]: Manage Users
+      - button "📒 Borrow Records" [ref=e29] [cursor=pointer]:
+        - generic [ref=e30]: 📒
+        - generic [ref=e31]: Borrow Records
+      - button "🔔 Notifications" [ref=e32] [cursor=pointer]:
+        - generic [ref=e33]: 🔔
+        - generic [ref=e34]: Notifications
+      - button "👤 My Profile" [ref=e35] [cursor=pointer]:
+        - generic [ref=e36]: 👤
+        - generic [ref=e37]: My Profile
+    - button "Logout" [ref=e39] [cursor=pointer]
+  - generic [ref=e41]:
+    - heading "Manage Users" [level=2] [ref=e52]
+    - generic [ref=e44]:
+      - textbox "Search by username or name..." [ref=e53]
+      - combobox [ref=e54]:
+        - option "All Roles" [selected]
+        - option "Student"
+        - option "Staff"
+        - option "Author"
+        - option "Librarian"
+    - table [ref=e55]:
+      - rowgroup [ref=e56]:
+        - row "Username Full Name Role Active Last Login Actions" [ref=e57]:
+          - columnheader "Username" [ref=e58]
+          - columnheader "Full Name" [ref=e59]
+          - columnheader "Role" [ref=e60]
+          - columnheader "Active" [ref=e61]
+          - columnheader "Last Login" [ref=e62]
+          - columnheader "Actions" [ref=e63]
+      - rowgroup [ref=e64]:
+        - row "sa7_verify_test Verify User staff Yes Never Deactivate" [ref=e65]:
+          - cell "sa7_verify_test" [ref=e66]
+          - cell "Verify User" [ref=e67]
+          - cell "staff" [ref=e68]
+          - cell "Yes" [ref=e69]
+          - cell "Never" [ref=e70]
+          - cell "Deactivate" [ref=e71]:
+            - button "Deactivate" [ref=e72] [cursor=pointer]
+        - row "sa7_test_user SA7 Test User student Yes 5/16/2026 Deactivate" [ref=e73]:
+          - cell "sa7_test_user" [ref=e74]
+          - cell "SA7 Test User" [ref=e75]
+          - cell "student" [ref=e76]
+          - cell "Yes" [ref=e77]
+          - cell "5/16/2026" [ref=e78]
+          - cell "Deactivate" [ref=e79]:
+            - button "Deactivate" [ref=e80] [cursor=pointer]
+        - row "test_user Test User student Yes Never Deactivate" [ref=e81]:
+          - cell "test_user" [ref=e82]
+          - cell "Test User" [ref=e83]
+          - cell "student" [ref=e84]
+          - cell "Yes" [ref=e85]
+          - cell "Never" [ref=e86]
+          - cell "Deactivate" [ref=e87]:
+            - button "Deactivate" [ref=e88] [cursor=pointer]
+        - row "librarian_sa5 SA5 Librarian librarian Yes 5/16/2026 Deactivate" [ref=e89]:
+          - cell "librarian_sa5" [ref=e90]
+          - cell "SA5 Librarian" [ref=e91]
+          - cell "librarian" [ref=e92]
+          - cell "Yes" [ref=e93]
+          - cell "5/16/2026" [ref=e94]
+          - cell "Deactivate" [ref=e95]:
+            - button "Deactivate" [ref=e96] [cursor=pointer]
+        - row "student_sa5 SA5 Student student Yes 5/16/2026 Deactivate" [ref=e97]:
+          - cell "student_sa5" [ref=e98]
+          - cell "SA5 Student" [ref=e99]
+          - cell "student" [ref=e100]
+          - cell "Yes" [ref=e101]
+          - cell "5/16/2026" [ref=e102]
+          - cell "Deactivate" [ref=e103]:
+            - button "Deactivate" [ref=e104] [cursor=pointer]
+        - row "author_sa5 SA5 Author author Yes 5/16/2026 Deactivate" [ref=e105]:
+          - cell "author_sa5" [ref=e106]
+          - cell "SA5 Author" [ref=e107]
+          - cell "author" [ref=e108]
+          - cell "Yes" [ref=e109]
+          - cell "5/16/2026" [ref=e110]
+          - cell "Deactivate" [ref=e111]:
+            - button "Deactivate" [ref=e112] [cursor=pointer]
+        - row "student_demo Student Demo student Yes 5/16/2026 Deactivate" [ref=e113]:
+          - cell "student_demo" [ref=e114]
+          - cell "Student Demo" [ref=e115]
+          - cell "student" [ref=e116]
+          - cell "Yes" [ref=e117]
+          - cell "5/16/2026" [ref=e118]
+          - cell "Deactivate" [ref=e119]:
+            - button "Deactivate" [ref=e120] [cursor=pointer]
+        - row "staff_demo Staff Demo staff Yes Never Deactivate" [ref=e121]:
+          - cell "staff_demo" [ref=e122]
+          - cell "Staff Demo" [ref=e123]
+          - cell "staff" [ref=e124]
+          - cell "Yes" [ref=e125]
+          - cell "Never" [ref=e126]
+          - cell "Deactivate" [ref=e127]:
+            - button "Deactivate" [ref=e128] [cursor=pointer]
+        - row "author_demo Author Demo author Yes 5/16/2026 Deactivate" [ref=e129]:
+          - cell "author_demo" [ref=e130]
+          - cell "Author Demo" [ref=e131]
+          - cell "author" [ref=e132]
+          - cell "Yes" [ref=e133]
+          - cell "5/16/2026" [ref=e134]
+          - cell "Deactivate" [ref=e135]:
+            - button "Deactivate" [ref=e136] [cursor=pointer]
+        - row "librarian_demo Librarian Demo librarian Yes 5/16/2026 Deactivate" [ref=e137]:
+          - cell "librarian_demo" [ref=e138]
+          - cell "Librarian Demo" [ref=e139]
+          - cell "librarian" [ref=e140]
+          - cell "Yes" [ref=e141]
+          - cell "5/16/2026" [ref=e142]
+          - cell "Deactivate" [ref=e143]:
+            - button "Deactivate" [ref=e144] [cursor=pointer]

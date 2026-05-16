@@ -1,202 +1,261 @@
+// BiblioVault AuthorReviews component — displays all reviews on the
+// author's books with reply and flag functionality.
+// Props: { authorId }
+
 import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
-import StarRating from './StarRating';
+import StarRating from './StarRating.jsx';
 
-const API = axios.create({ baseURL: '/api' });
+const API_BASE = '';
 
-export default function AuthorReviews() {
-  const [books, setBooks] = useState([]);
+function getToken() {
+  return localStorage.getItem('token') || '';
+}
+
+function getAuthHeaders() {
+  return { Authorization: `Bearer ${getToken()}` };
+}
+
+export default function AuthorReviews({ authorId }) {
+  const [booksWithReviews, setBooksWithReviews] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [replyText, setReplyText] = useState({});
-  const [replyingTo, setReplyingTo] = useState(null);
-  const [submitting, setSubmitting] = useState({});
+  const [replyContent, setReplyContent] = useState({});
+  const [flagging, setFlagging] = useState({});
+  const [message, setMessage] = useState(null);
 
-  const fetchData = useCallback(async () => {
+  const fetchAuthorReviews = useCallback(async () => {
+    if (!authorId) return;
+    setLoading(true);
+    setError(null);
     try {
-      setLoading(true);
-      const token = localStorage.getItem('token');
-      const headers = { Authorization: `Bearer ${token}` };
+      // Get the author's books
+      const booksRes = await axios.get(`${API_BASE}/api/books/my-submissions`, {
+        headers: getAuthHeaders(),
+      });
+      const books = booksRes.data || [];
 
-      // Get author's books
-      const subsRes = await API.get('/books/my-submissions', { headers });
-      const authorBooks = subsRes.data || [];
-
-      // For each book, get reviews with replies
-      const booksWithReviews = await Promise.all(
-        authorBooks.map(async (book) => {
-          try {
-            const revRes = await API.get(`/reviews/book/${book.id}/with-replies`, { headers });
-            return { ...book, reviews_data: revRes.data };
-          } catch (err) {
-            return { ...book, reviews_data: { reviews: [], aggregate: null } };
+      // For each book, fetch its reviews
+      const booksWithReviewsData = [];
+      for (const book of books) {
+        try {
+          const reviewsRes = await axios.get(
+            `${API_BASE}/api/reviews/book/${book.id}?sort=recent`,
+            { headers: getAuthHeaders() }
+          );
+          if (reviewsRes.data.reviews && reviewsRes.data.reviews.length > 0) {
+            booksWithReviewsData.push({
+              ...book,
+              reviews: reviewsRes.data.reviews,
+              avg_rating: reviewsRes.data.avg_rating,
+              review_count: reviewsRes.data.review_count,
+            });
           }
-        })
-      );
-
-      setBooks(booksWithReviews.filter(b => b.reviews_data.reviews.length > 0));
+        } catch (err) {
+          // Skip books whose reviews couldn't be loaded
+          console.error(`Failed to load reviews for book ${book.id}:`, err.message);
+        }
+      }
+      setBooksWithReviews(booksWithReviewsData);
     } catch (err) {
       setError(err.response?.data?.error || 'Failed to load reviews');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [authorId]);
 
   useEffect(() => {
-    fetchData();
-  }, [fetchData]);
+    fetchAuthorReviews();
+  }, [fetchAuthorReviews]);
 
-  const handleFlag = async (reviewId) => {
+  const handleReply = async (reviewId) => {
+    const content = replyContent[reviewId];
+    if (!content || !content.trim()) return;
+
     try {
-      const token = localStorage.getItem('token');
-      await API.post(`/reviews/${reviewId}/flag`, {}, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      // Refresh
-      fetchData();
+      await axios.post(
+        `${API_BASE}/api/reviews/${reviewId}/reply`,
+        { content: content.trim() },
+        { headers: getAuthHeaders() }
+      );
+      setReplyContent((prev) => ({ ...prev, [reviewId]: '' }));
+      setMessage({ type: 'success', text: 'Reply posted successfully' });
+      fetchAuthorReviews();
     } catch (err) {
-      setError(err.response?.data?.error || 'Failed to flag review');
+      setMessage({ type: 'error', text: err.response?.data?.error || 'Failed to post reply' });
     }
   };
 
-  const handleReply = async (reviewId) => {
-    const content = replyText[reviewId];
-    if (!content || content.trim().length === 0) return;
-
+  const handleFlag = async (reviewId) => {
+    setFlagging((prev) => ({ ...prev, [reviewId]: true }));
     try {
-      setSubmitting(prev => ({ ...prev, [reviewId]: true }));
-      const token = localStorage.getItem('token');
-      await API.post(`/reviews/${reviewId}/reply`, { content: content.trim() }, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      setReplyText(prev => ({ ...prev, [reviewId]: '' }));
-      setReplyingTo(null);
-      fetchData();
+      await axios.post(
+        `${API_BASE}/api/reviews/${reviewId}/flag`,
+        {},
+        { headers: getAuthHeaders() }
+      );
+      setMessage({ type: 'success', text: 'Review flagged for moderation' });
     } catch (err) {
-      setError(err.response?.data?.error || 'Failed to reply');
+      setMessage({ type: 'error', text: err.response?.data?.error || 'Failed to flag review' });
     } finally {
-      setSubmitting(prev => ({ ...prev, [reviewId]: false }));
+      setFlagging((prev) => ({ ...prev, [reviewId]: false }));
     }
   };
 
   if (loading) {
-    return <div style={{ padding: 24, color: '#666' }}>Loading reviews...</div>;
+    return <div style={{ padding: '1rem', color: '#666' }}>Loading reviews...</div>;
   }
 
   if (error) {
     return (
-      <div style={{ padding: 24 }}>
-        <div style={{ padding: 12, background: '#fdecea', color: '#c62828', borderRadius: 4, marginBottom: 12 }}>{error}</div>
-        <button onClick={() => setError(null)} style={{ padding: '6px 12px', background: '#1a1a2e', color: '#fff', border: 'none', borderRadius: 4, cursor: 'pointer' }}>Dismiss</button>
+      <div style={{
+        padding: '1rem',
+        background: '#ffe0e0',
+        color: '#8b0000',
+        borderRadius: '6px',
+      }}>
+        {error}
       </div>
     );
   }
 
-  if (books.length === 0) {
+  if (booksWithReviews.length === 0) {
     return (
-      <div style={{ padding: 24, textAlign: 'center', color: '#999', fontSize: 15 }}>
+      <div style={{ textAlign: 'center', color: '#999', padding: '2rem' }}>
         No reviews on your books yet.
       </div>
     );
   }
 
   return (
-    <div style={{ fontFamily: 'DM Sans, sans-serif', padding: 24 }}>
-      <h2 style={{ fontFamily: 'Cormorant Garamond, serif', fontSize: 24, margin: '0 0 16px 0' }}>
-        Reviews for Your Books
-      </h2>
+    <div style={{ fontFamily: 'DM Sans, sans-serif' }}>
+      {message && (
+        <div style={{
+          padding: '0.75rem',
+          marginBottom: '1rem',
+          borderRadius: '6px',
+          background: message.type === 'success' ? '#e8f5e9' : '#ffe0e0',
+          color: message.type === 'success' ? '#2e7d32' : '#8b0000',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+        }}>
+          <span>{message.text}</span>
+          <button
+            onClick={() => setMessage(null)}
+            style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '1.2rem' }}
+          >
+            &times;
+          </button>
+        </div>
+      )}
 
-      {books.map((book) => (
-        <div key={book.id} style={{ marginBottom: 24, padding: 16, background: '#fafafa', borderRadius: 8, border: '1px solid #e0d5c7' }}>
-          <h3 style={{ fontFamily: 'Cormorant Garamond, serif', fontSize: 18, margin: '0 0 4px 0' }}>
+      {booksWithReviews.map((book) => (
+        <div key={book.id} style={{
+          marginBottom: '2rem',
+          padding: '1rem',
+          border: '1px solid #e0d8c8',
+          borderRadius: '8px',
+        }}>
+          <h3 style={{
+            fontFamily: 'Cormorant Garamond, serif',
+            color: '#2c1810',
+            margin: '0 0 0.25rem 0',
+          }}>
             {book.title}
           </h3>
-          <div style={{ fontSize: 13, color: '#666', marginBottom: 12 }}>
-            {book.reviews_data.aggregate && (
-              <span>
-                Avg: {book.reviews_data.aggregate.avg_rating.toFixed(1)} ({book.reviews_data.aggregate.count} review{book.reviews_data.aggregate.count !== 1 ? 's' : ''})
-              </span>
-            )}
+          <div style={{ fontSize: '0.85rem', color: '#666', marginBottom: '1rem' }}>
+            Avg Rating: {book.avg_rating ? Number(book.avg_rating).toFixed(1) : 'N/A'} |{' '}
+            {book.review_count || 0} review{(book.review_count || 0) !== 1 ? 's' : ''}
           </div>
 
-          {book.reviews_data.reviews.map((review) => (
-            <div key={review.id} style={{ marginBottom: 12, padding: 12, background: '#fff', borderRadius: 6, border: '1px solid #e0d5c7' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <strong style={{ fontSize: 14 }}>{review.username}</strong>
+          {book.reviews.map((review) => (
+            <div key={review.id} style={{
+              padding: '0.75rem',
+              borderBottom: '1px solid #eee',
+              marginBottom: '0.5rem',
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <strong style={{ fontSize: '0.9rem' }}>{review.full_name || review.username}</strong>
                   <StarRating value={review.rating} readOnly />
                 </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span style={{ fontSize: 11, color: '#999' }}>
-                    {new Date(review.created_at).toLocaleDateString()}
-                  </span>
-                  <button
-                    onClick={() => handleFlag(review.id)}
-                    style={{ fontSize: 11, background: 'none', border: '1px solid #ddd', borderRadius: 4, padding: '2px 6px', cursor: 'pointer', color: '#c62828' }}
-                    title="Flag for moderation"
-                  >
-                    Flag
-                  </button>
-                </div>
+                <span style={{ fontSize: '0.75rem', color: '#999' }}>
+                  {review.created_at ? new Date(review.created_at).toLocaleDateString() : ''}
+                </span>
               </div>
+
               {review.content && (
-                <p style={{ margin: '4px 0', fontSize: 13, lineHeight: 1.5 }}>{review.content}</p>
+                <p style={{ margin: '0.5rem 0', fontSize: '0.9rem', color: '#444' }}>
+                  {review.content}
+                </p>
               )}
 
-              {/* Existing replies */}
-              {review.replies && review.replies.length > 0 && (
-                <div style={{ marginTop: 8, paddingLeft: 16, borderLeft: '2px solid #d4a017' }}>
-                  {review.replies.map((reply) => (
-                    <div key={reply.id} style={{ marginBottom: 4 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                        <strong style={{ fontSize: 12 }}>{reply.full_name}</strong>
-                        <span style={{ fontSize: 10, color: '#d4a017', fontWeight: 600 }}>You</span>
-                        <span style={{ fontSize: 10, color: '#999' }}>
-                          {new Date(reply.created_at).toLocaleDateString()}
-                        </span>
-                      </div>
-                      <p style={{ margin: '2px 0', fontSize: 13 }}>{reply.content}</p>
-                    </div>
-                  ))}
+              {/* Author reply display */}
+              {review.reply && (
+                <div style={{
+                  marginTop: '0.5rem',
+                  padding: '0.5rem 0.75rem',
+                  background: '#f8f6f0',
+                  borderLeft: '3px solid #c9a84c',
+                  borderRadius: '4px',
+                  fontSize: '0.85rem',
+                }}>
+                  <strong>Your reply:</strong> {review.reply.content}
                 </div>
               )}
 
-              {/* Reply form */}
-              {replyingTo === review.id && (
-                <div style={{ marginTop: 8 }}>
-                  <textarea
-                    value={replyText[review.id] || ''}
-                    onChange={(e) => setReplyText(prev => ({ ...prev, [review.id]: e.target.value }))}
-                    placeholder="Write your reply..."
-                    rows={2}
-                    style={{ width: '100%', padding: 8, border: '1px solid #ccc', borderRadius: 4, resize: 'vertical', fontFamily: 'DM Sans, sans-serif', fontSize: 13, boxSizing: 'border-box' }}
-                  />
-                  <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+              {/* Reply form and flag button */}
+              <div style={{ marginTop: '0.5rem', display: 'flex', gap: '0.5rem', alignItems: 'flex-start' }}>
+                {!review.reply && (
+                  <div style={{ flex: 1, display: 'flex', gap: '0.5rem' }}>
+                    <input
+                      type="text"
+                      value={replyContent[review.id] || ''}
+                      onChange={(e) => setReplyContent((prev) => ({ ...prev, [review.id]: e.target.value }))}
+                      placeholder="Write a reply..."
+                      style={{
+                        flex: 1,
+                        padding: '0.4rem 0.5rem',
+                        border: '1px solid #ccc',
+                        borderRadius: '4px',
+                        fontSize: '0.85rem',
+                      }}
+                    />
                     <button
                       onClick={() => handleReply(review.id)}
-                      disabled={submitting[review.id]}
-                      style={{ padding: '4px 12px', background: '#1a1a2e', color: '#fff', border: 'none', borderRadius: 4, cursor: submitting[review.id] ? 'default' : 'pointer', opacity: submitting[review.id] ? 0.6 : 1 }}
+                      disabled={!replyContent[review.id] || !replyContent[review.id].trim()}
+                      style={{
+                        padding: '0.4rem 0.75rem',
+                        background: replyContent[review.id]?.trim() ? '#2c1810' : '#ccc',
+                        color: '#fff',
+                        border: 'none',
+                        borderRadius: '4px',
+                        cursor: replyContent[review.id]?.trim() ? 'pointer' : 'not-allowed',
+                        fontSize: '0.85rem',
+                      }}
                     >
-                      {submitting[review.id] ? 'Sending...' : 'Send Reply'}
-                    </button>
-                    <button
-                      onClick={() => { setReplyingTo(null); setReplyText(prev => ({ ...prev, [review.id]: '' })); }}
-                      style={{ padding: '4px 12px', background: 'none', border: '1px solid #ccc', borderRadius: 4, cursor: 'pointer' }}
-                    >
-                      Cancel
+                      Reply
                     </button>
                   </div>
-                </div>
-              )}
-
-              {replyingTo !== review.id && (
+                )}
                 <button
-                  onClick={() => setReplyingTo(review.id)}
-                  style={{ marginTop: 6, fontSize: 12, background: 'none', border: '1px solid #ddd', borderRadius: 4, padding: '2px 8px', cursor: 'pointer' }}
+                  onClick={() => handleFlag(review.id)}
+                  disabled={flagging[review.id]}
+                  style={{
+                    padding: '0.4rem 0.75rem',
+                    background: 'none',
+                    border: '1px solid #d32f2f',
+                    borderRadius: '4px',
+                    color: '#d32f2f',
+                    cursor: flagging[review.id] ? 'not-allowed' : 'pointer',
+                    fontSize: '0.85rem',
+                    whiteSpace: 'nowrap',
+                  }}
                 >
-                  Reply
+                  {flagging[review.id] ? 'Flagging...' : 'Flag'}
                 </button>
-              )}
+              </div>
             </div>
           ))}
         </div>

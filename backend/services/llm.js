@@ -1,110 +1,121 @@
+// BiblioVault LLM service — DashScope (Alibaba Cloud) integration for
+// book summary generation and review sentiment classification.
+// Uses qwen3.5-flash model. Gracefully degrades when DASHSCOPE_API_KEY is missing.
+// Exports: generateBookSummary, classifySentiment
+
 import axios from 'axios';
 
-const DASHSCOPE_API_KEY = process.env.DASHSCOPE_API_KEY || '';
-const LLM_ENDPOINT = 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1';
+const LLM_ENDPOINT = 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions';
 const LLM_MODEL = 'qwen3.5-flash';
+const TIMEOUT_MS = 30000;
+
+function getApiKey() {
+  return process.env.DASHSCOPE_API_KEY || '';
+}
 
 /**
- * Generate a book summary using the DashScope LLM.
- * @param {string} title - Book title
- * @param {string} genre - Book genre
- * @param {string} description - Book description
- * @param {'short'|'medium'|'detailed'} style - Summary length
- * @returns {Promise<string>} The generated summary text
- * @throws {Error} If DASHSCOPE_API_KEY is not configured or API call fails
+ * Calls the DashScope API with the given messages and returns the response text.
+ * @param {Array} messages - Array of { role, content } objects
+ * @returns {Promise<string>} The assistant's response text
  */
-export async function generateBookSummary(title, genre, description, style = 'medium') {
-  if (!DASHSCOPE_API_KEY) {
-    throw new Error('DASHSCOPE_API_KEY not configured');
+async function callDashScope(messages) {
+  const apiKey = getApiKey();
+  if (!apiKey) {
+    throw new Error('DASHSCOPE_API_KEY is not set. Please configure it in backend/.env');
   }
-
-  const stylePrompts = {
-    short: 'Generate a very brief one-sentence summary of the following book.',
-    medium: 'Generate a single paragraph summary of the following book.',
-    detailed: 'Generate a detailed three-paragraph summary of the following book.'
-  };
-
-  const prompt = `${stylePrompts[style] || stylePrompts.medium}\n\nTitle: ${title}\nGenre: ${genre}\nDescription: ${description}`;
 
   try {
     const response = await axios.post(
-      `${LLM_ENDPOINT}/chat/completions`,
+      LLM_ENDPOINT,
       {
         model: LLM_MODEL,
-        messages: [
-          { role: 'system', content: 'You are a helpful assistant that generates book summaries.' },
-          { role: 'user', content: prompt }
-        ],
-        max_tokens: style === 'short' ? 100 : style === 'detailed' ? 500 : 250,
-        temperature: 0.7
+        messages,
       },
       {
         headers: {
-          'Authorization': `Bearer ${DASHSCOPE_API_KEY}`,
-          'Content-Type': 'application/json'
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
         },
-        timeout: 30000
+        timeout: TIMEOUT_MS,
       }
     );
 
-    const content = response.data?.choices?.[0]?.message?.content;
-    if (!content) {
-      throw new Error('Empty response from LLM');
+    if (
+      response.data &&
+      response.data.choices &&
+      response.data.choices[0] &&
+      response.data.choices[0].message
+    ) {
+      return response.data.choices[0].message.content.trim();
     }
 
-    return content.trim();
+    throw new Error('Unexpected response shape from DashScope API');
   } catch (err) {
     if (err.response) {
-      console.error('LLM API error:', err.response.status, err.response.data);
-      throw new Error(`LLM API error: ${err.response.data?.error?.message || err.response.statusText}`);
+      throw new Error(`DashScope API error: ${err.response.status} ${JSON.stringify(err.response.data)}`);
     }
-    console.error('LLM request error:', err.message);
-    throw new Error(`Failed to generate summary: ${err.message}`);
+    if (err.code === 'ECONNABORTED') {
+      throw new Error('DashScope API request timed out');
+    }
+    throw new Error(`DashScope API request failed: ${err.message}`);
   }
 }
 
 /**
- * Classify the sentiment of a review text using DashScope.
- * On ANY error, silently returns 'neutral'.
- * @param {string} reviewText - The review text to classify
+ * Generates a book summary using the LLM.
+ * @param {string} title - Book title
+ * @param {string} genre - Book genre
+ * @param {string} description - Existing description or context
+ * @param {'short'|'medium'|'detailed'} style - Summary length style
+ * @returns {Promise<string>} Generated summary
+ */
+export async function generateBookSummary(title, genre, description, style = 'medium') {
+  const styleInstructions = {
+    short: 'Generate a very brief one-sentence summary of the book.',
+    medium: 'Generate a one-paragraph summary (3-5 sentences) describing the book.',
+    detailed: 'Generate a detailed three-paragraph summary covering the book\'s premise, key themes, and target audience.',
+  };
+
+  const instruction = styleInstructions[style] || styleInstructions.medium;
+
+  const prompt = `You are a professional book summarizer. ${instruction}
+
+Title: "${title}"
+Genre: ${genre}
+${description ? `Description/Context: ${description}` : ''}
+
+Generate the summary based on the information above. If limited information is available, make reasonable inferences from the title and genre.`;
+
+  return await callDashScope([{ role: 'user', content: prompt }]);
+}
+
+/**
+ * Classifies a review's sentiment as positive, negative, or neutral.
+ * Returns 'neutral' on ANY error (missing key, timeout, parse failure) — never throws.
+ * @param {string} reviewText - The review content to classify
  * @returns {Promise<'positive'|'negative'|'neutral'>}
  */
 export async function classifySentiment(reviewText) {
-  if (!DASHSCOPE_API_KEY || !reviewText || reviewText.trim().length === 0) {
-    return 'neutral';
-  }
-
   try {
-    const response = await axios.post(
-      `${LLM_ENDPOINT}/chat/completions`,
-      {
-        model: LLM_MODEL,
-        messages: [
-          { role: 'system', content: 'Classify the sentiment of the following book review as "positive", "negative", or "neutral". Respond with only one word.' },
-          { role: 'user', content: reviewText }
-        ],
-        max_tokens: 10,
-        temperature: 0.1
-      },
-      {
-        headers: {
-          'Authorization': `Bearer ${DASHSCOPE_API_KEY}`,
-          'Content-Type': 'application/json'
-        },
-        timeout: 15000
-      }
-    );
-
-    const raw = response.data?.choices?.[0]?.message?.content;
-    if (!raw) return 'neutral';
-
-    const sentiment = raw.trim().toLowerCase();
-    if (['positive', 'negative', 'neutral'].includes(sentiment)) {
-      return sentiment;
+    const apiKey = getApiKey();
+    if (!apiKey || !reviewText || !reviewText.trim()) {
+      return 'neutral';
     }
+
+    const prompt = `Classify the sentiment of the following book review as "positive", "negative", or "neutral". Respond with ONLY one word: positive, negative, or neutral.
+
+Review: "${reviewText.substring(0, 1000)}"
+
+Sentiment:`;
+
+    const result = await callDashScope([{ role: 'user', content: prompt }]);
+    const cleaned = result.toLowerCase().trim();
+
+    if (cleaned.includes('positive')) return 'positive';
+    if (cleaned.includes('negative')) return 'negative';
     return 'neutral';
   } catch (err) {
-    console.error('classifySentiment error:', err.message);
+    console.error('Sentiment classification error (defaulting to neutral):', err.message);
     return 'neutral';
   }
 }

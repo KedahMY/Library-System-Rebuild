@@ -291,10 +291,12 @@ ai-rebuild/test-pack/results/            (logs)
 | `frontend/src/components/*` | M7 | SA-8 | terminal |
 | `ai-rebuild/test-pack/smoke/*` | M0–M9 | shared (whoever creates the script) | Smoke scripts are content-stable once written; subagents that add a script for their gate write to a path matching `0X_<area>.sh` and never edit another SA's script. |
 | `ai-rebuild/test-pack/playwright/*` | M7–M8 | SA-8 | terminal |
-| `ai-rebuild/test-pack/results/*` | M0–M9 | Verifier (read-only for everyone else) | Append-only logs. |
+| `ai-rebuild/test-pack/results/*` | M0–M10 | Verifier + Audit (read-only for everyone else) | Append-only logs. |
+| `ai-rebuild/test-pack/results/requirement_audit.log` | M10 | Audit subagent | Terminal — written exclusively by the M10 audit (`ai-rebuild/prompts/subagent_requirement_audit.md`). |
+| `ai-rebuild/notes/audit_failures.md` | M10 | Audit subagent | Terminal — written exclusively by the M10 audit. |
 | `README.md` stub | M0 | SA-1 | placeholder |
 | `README.md` final | M9 | SA-6 | terminal |
-| `ai-rebuild/notes/decisions.md` | M0–M9 | shared (append-only) | Anyone may append; nobody edits prior entries. |
+| `ai-rebuild/notes/decisions.md` | M0–M10 | shared (append-only) | Anyone may append; nobody edits prior entries. |
 
 ---
 
@@ -311,6 +313,9 @@ M6 →   SA-7 (depends on SA-3 routes for auth)
 M7 →   SA-8 (depends on SA-7 pages; can start StarRating/BookModal earlier)
 M8 →   Verifier runs Playwright
 M9 →   SA-1 / SA-6 finalize README + scripts
+M10 →  Requirement Audit subagent (HARD GATE)
+        — walks all 182 REQ-* in 17_acceptance_checklist.md
+        — on failure: lead re-spawns owners and re-runs audit (max 5 cycles)
 ```
 
 ---

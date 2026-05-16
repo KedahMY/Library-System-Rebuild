@@ -1,10 +1,15 @@
+// BiblioVault auth middleware — JWT token generation, authentication, authorization,
+// and password validation helpers. Used by all protected API routes.
+// Exports: authenticate, authorize, generateToken, authenticateWithFallback, validatePassword
+
 import jwt from 'jsonwebtoken';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'library-system-secret-key-2024';
 
 /**
- * Generate a JWT token for the given user.
- * Signs { id, username, role, full_name } with expiresIn '24h'.
+ * Signs a JWT with user identity claims.
+ * Payload: { id, username, role, full_name }
+ * Expires in 24 hours.
  */
 export function generateToken(user) {
   return jwt.sign(
@@ -15,8 +20,8 @@ export function generateToken(user) {
 }
 
 /**
- * Authenticate middleware — reads Authorization: Bearer <token> header.
- * On success sets req.user = { id, username, role, full_name } and calls next().
+ * Express middleware that reads Authorization: Bearer <token>.
+ * On success sets req.user = { id, username, role, full_name }.
  * Returns 401 JSON if missing, invalid, or expired.
  */
 export function authenticate(req, res, next) {
@@ -32,7 +37,7 @@ export function authenticate(req, res, next) {
       id: decoded.id,
       username: decoded.username,
       role: decoded.role,
-      full_name: decoded.full_name
+      full_name: decoded.full_name,
     };
     next();
   } catch (err) {
@@ -41,8 +46,9 @@ export function authenticate(req, res, next) {
 }
 
 /**
- * Authorize middleware factory — returns middleware that calls next() if
- * req.user.role is one of the supplied roles, or 403 otherwise.
+ * Factory that returns middleware to restrict access to specific roles.
+ * Must be used after `authenticate`.
+ * Returns 403 JSON if the user's role is not in the allowed list.
  */
 export function authorize(...roles) {
   return (req, res, next) => {
@@ -57,9 +63,42 @@ export function authorize(...roles) {
 }
 
 /**
- * Validate password strength.
- * Returns { valid: true } or { valid: false, message: '...' }.
- * Rules: 8+ chars, >=1 uppercase, >=1 lowercase, >=1 digit, >=1 special.
+ * Like authenticate, but also accepts the token from req.body._token.
+ * Used by the recovery route for sendBeacon support (cannot set custom headers).
+ */
+export function authenticateWithFallback(req, res, next) {
+  const authHeader = req.headers.authorization;
+  const token = authHeader && authHeader.startsWith('Bearer ')
+    ? authHeader.split(' ')[1]
+    : (req.body && req.body._token);
+
+  if (!token) {
+    return res.status(401).json({ error: 'Authentication required' });
+  }
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.user = {
+      id: decoded.id,
+      username: decoded.username,
+      role: decoded.role,
+      full_name: decoded.full_name,
+    };
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: 'Invalid or expired token' });
+  }
+}
+
+/**
+ * Validates a password against the project's strength policy:
+ * - Minimum 8 characters
+ * - At least 1 uppercase letter
+ * - At least 1 lowercase letter
+ * - At least 1 digit
+ * - At least 1 special character (!@#$%^&*(),.?":{}|<>)
+ *
+ * Returns { valid: boolean, message: string }
  */
 export function validatePassword(password) {
   if (!password || password.length < 8) {
@@ -77,5 +116,5 @@ export function validatePassword(password) {
   if (!/[!@#$%^&*(),.?":{}|<>]/.test(password)) {
     return { valid: false, message: 'Password must contain at least one special character' };
   }
-  return { valid: true };
+  return { valid: true, message: '' };
 }

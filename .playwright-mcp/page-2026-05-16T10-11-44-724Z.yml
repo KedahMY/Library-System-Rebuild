@@ -1,0 +1,68 @@
+- generic [ref=e18]:
+  - generic [ref=e19]:
+    - generic [ref=e20]: BiblioVault
+    - generic [ref=e21]: Librarian
+    - navigation [ref=e22]:
+      - button "⏳ Pending Submissions" [ref=e23] [cursor=pointer]:
+        - generic [ref=e24]: ⏳
+        - generic [ref=e25]: Pending Submissions
+      - button "📋 All Submissions" [ref=e26] [cursor=pointer]:
+        - generic [ref=e27]: 📋
+        - generic [ref=e28]: All Submissions
+      - button "📚 Manage Books" [ref=e29] [cursor=pointer]:
+        - generic [ref=e30]: 📚
+        - generic [ref=e31]: Manage Books
+      - button "📨 Book Requests" [ref=e32] [cursor=pointer]:
+        - generic [ref=e33]: 📨
+        - generic [ref=e34]: Book Requests
+      - button "📊 Downloaded Stats" [ref=e35] [cursor=pointer]:
+        - generic [ref=e36]: 📊
+        - generic [ref=e37]: Downloaded Stats
+      - button "🚩 Flagged Reviews" [ref=e38] [cursor=pointer]:
+        - generic [ref=e39]: 🚩
+        - generic [ref=e40]: Flagged Reviews
+      - button "👥 Manage Users" [ref=e41] [cursor=pointer]:
+        - generic [ref=e42]: 👥
+        - generic [ref=e43]: Manage Users
+      - button "📒 Borrow Records" [ref=e44] [cursor=pointer]:
+        - generic [ref=e45]: 📒
+        - generic [ref=e46]: Borrow Records
+      - button "🔔 Notifications" [ref=e47] [cursor=pointer]:
+        - generic [ref=e48]: 🔔
+        - generic [ref=e49]: Notifications
+      - button "👤 My Profile" [ref=e50] [cursor=pointer]:
+        - generic [ref=e51]: 👤
+        - generic [ref=e52]: My Profile
+    - button "Logout" [ref=e54] [cursor=pointer]
+  - generic [ref=e56]:
+    - heading "Pending Submissions" [level=2] [ref=e58]
+    - generic [ref=e59]:
+      - textbox "Title..." [ref=e60]
+      - textbox "Author..." [ref=e61]
+      - combobox [ref=e62]:
+        - option "All Genres" [selected]
+        - option "Fiction"
+        - option "Non-Fiction"
+        - option "Science Fiction"
+        - option "Fantasy"
+        - option "Mystery"
+        - option "Romance"
+        - option "Thriller"
+        - option "Horror"
+        - option "Biography"
+        - option "History"
+        - option "Science"
+        - option "Technology"
+        - option "Philosophy"
+        - option "Poetry"
+        - option "Drama"
+        - option "Comics"
+      - combobox [ref=e63]:
+        - option "All Status" [selected]
+        - option "Pending"
+        - option "Approved"
+        - option "Rejected"
+        - option "Pending Deletion"
+      - textbox [ref=e64]
+      - textbox [ref=e65]
+    - generic [ref=e66]: No pending submissions.

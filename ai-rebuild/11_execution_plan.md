@@ -25,6 +25,11 @@ M0 Scaffold ────────────────► M1 DB ───�
                                                                   │
                                                                   ▼
                                                        M9 README + Polish + Final Smoke
+                                                                  │
+                                                                  ▼
+                                                       M10 Requirement Audit (HARD GATE)
+                                                            ↺ re-spawn failed SAs
+                                                            until ALL REQUIREMENTS PASS
 ```
 
 Parallel opportunities:
@@ -135,7 +140,17 @@ Parallel opportunities:
 | Inputs | All prior |
 | Outputs | Final `README.md`, demo-data verification, manual checklist signed off |
 | Gate | Gate D — every MUST row in `test-pack/manual/checklist.md` signed off |
-| Notes | After this, success criteria SC-1 through SC-10 in `00_mission.md` should all be PASS. |
+| Notes | After this, advance directly to M10. |
+
+### M10 · Requirement Audit (HARD GATE)
+
+| | |
+|---|---|
+| Owner | Requirement Audit subagent — `ai-rebuild/prompts/subagent_requirement_audit.md` |
+| Inputs | Running system on `:8000` + `:3000`; `17_acceptance_checklist.md` (182 REQ-* rows) |
+| Outputs | `ai-rebuild/test-pack/results/requirement_audit.log` |
+| Gate | Final line must read `ALL REQUIREMENTS PASS (182/182)` |
+| Notes | If any REQ-* fails, the lead groups failures by Owner column and re-spawns the offending subagent(s) with attempt=2. Max 5 audit cycles before BLOCKER escalation. After this, SC-1 through SC-11 in `00_mission.md` should all be PASS. |
 
 ---
 
@@ -153,7 +168,8 @@ Parallel opportunities:
 | M7 | 6 |
 | M8 | 1 |
 | M9 | 1 |
-| **Total** | **27** |
+| M10 | 2 (audit + up to 5 retry cycles) |
+| **Total** | **29** |
 
 Frontend (M6 + M7) is the heaviest. Books router (M3) and Phase-3 backend (M5) are next.
 

@@ -1,5 +1,7 @@
 # 01 · Reference Repository Analysis
 
+> **STATUS: ADVISORY / BACKGROUND ONLY.** This file describes the reference implementation that the artifact pack was reverse-engineered from. It is NOT authoritative for the rebuild. If anything here conflicts with `16_full_requirements_verbatim.md`, `04_architecture_lock.md`, or `05_data_model.md`, those files win. Use this only to understand intent, naming conventions, and approximate scale.
+
 A factual inventory of the source-of-truth implementation in this repo. Captured at commit `eae28ce` on branch `master`, project date `2026-05-14`.
 
 ---

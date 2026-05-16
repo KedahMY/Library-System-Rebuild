@@ -1,6 +1,8 @@
 # 09 · Master Prompt for the Lead Agent
 
 > Copy the block between the `<<<MASTER_PROMPT` / `MASTER_PROMPT>>>` markers into a fresh Claude Code session opened at the empty rebuild target directory. The `.env` file is already prepared — do not recreate it.
+>
+> **Enforcement note**: The artifact pack now includes `16_full_requirements_verbatim.md` (canonical spec) and `17_acceptance_checklist.md` (182 binary REQ-* checks). A final M10 Requirement Audit subagent walks every REQ-* against the running system. The rebuild is NOT complete until that audit returns `ALL REQUIREMENTS PASS (182/182)`.
 
 ---
 
@@ -35,20 +37,20 @@ Read every file below, IN THIS ORDER, before taking any action.
 2.  ai-rebuild/01_repo_analysis.md
 3.  ai-rebuild/04_architecture_lock.md
 4.  ai-rebuild/05_data_model.md
-5.  ai-rebuild/02_requirements_normalized.md
-6.  ai-rebuild/03_feature_gap_matrix.md
-7.  ai-rebuild/06_screen_flow.md
-8.  ai-rebuild/07_test_strategy.md
-9.  ai-rebuild/08_traceability_matrix.md
-10. ai-rebuild/11_execution_plan.md
-11. ai-rebuild/10_subagents.md
-12. ai-rebuild/13_risks_and_failure_modes.md
-13. ai-rebuild/14_human_inputs_required.md
-14. ai-rebuild/15_env_and_secrets_template.md
-15. ai-rebuild/12_rebuild_readme.md
+5.  ai-rebuild/16_full_requirements_verbatim.md      [CANONICAL — wins all conflicts]
+6.  ai-rebuild/17_acceptance_checklist.md            [182 REQ-* binary checks — the audit script]
+7.  ai-rebuild/02_requirements_normalized.md       (stable ID system used by 08; 16 wins on conflict)
+8.  ai-rebuild/06_screen_flow.md
+9.  ai-rebuild/07_test_strategy.md
+10. ai-rebuild/08_traceability_matrix.md
+11. ai-rebuild/11_execution_plan.md
+12. ai-rebuild/10_subagents.md
+13. ai-rebuild/13_risks_and_failure_modes.md
+14. ai-rebuild/14_human_inputs_required.md
+15. ai-rebuild/15_env_and_secrets_template.md
+16. ai-rebuild/12_rebuild_readme.md
 
 -- Pre-written subagent prompt files (read all before spawning any) --
-16. ai-rebuild/prompts/lead_orchestrator_prompt.md
 17. ai-rebuild/prompts/subagent_auth_profile.md
 18. ai-rebuild/prompts/subagent_catalog_submission.md
 19. ai-rebuild/prompts/subagent_borrow_reader.md
@@ -56,7 +58,26 @@ Read every file below, IN THIS ORDER, before taking any action.
 21. ai-rebuild/prompts/subagent_reviews_stats_llm.md
 22. ai-rebuild/prompts/subagent_librarian_admin_requests.md
 23. ai-rebuild/prompts/subagent_qa_regression.md
+24. ai-rebuild/prompts/subagent_requirement_audit.md  [M10 — HARD GATE]
 
+==========================================================
+DOCUMENT PRECEDENCE  (when artifacts disagree)
+==========================================================
+  1. 16_full_requirements_verbatim.md   (CANONICAL — exact rubric text)
+  2. 17_acceptance_checklist.md         (binary verification of #1)
+  3. 04_architecture_lock.md            (pinned tech invariants)
+  4. 05_data_model.md                   (DB schema invariants)
+  5. 02_requirements_normalized.md      (normalised IDs)
+  6. 06_screen_flow.md                  (UI flows)
+  7. 07/08/10/11                        (test, traceability, owners, plan)
+  8. README.md / reference repo         (documentation only)
+
+If any other file contradicts file #1, file #1 wins. Update the other file
+or log a one-line note in ai-rebuild/notes/decisions.md and continue.
+
+==========================================================
+CONTEXT-LOCK
+==========================================================
 After reading, write a CONTEXT-LOCK summary confirming THESE EXACT VALUES
 (if any value differs from what is stated below, STOP and re-read the source file):
 
@@ -87,14 +108,43 @@ After reading, write a CONTEXT-LOCK summary confirming THESE EXACT VALUES
 ==========================================================
 PHASE 1 — PLAN
 ==========================================================
-Use TodoWrite to create a milestone-level list mirroring 11_execution_plan.md (M0 … M9).
-One todo item per milestone. Keep implementation detail inside subagents.
+Use TodoWrite to create a milestone-level list mirroring 11_execution_plan.md
+EXTENDED by one extra milestone — M10 Requirement Audit (this is non-negotiable):
+
+  M0  Scaffold              (SA-1)
+  M1  Database              (SA-2)
+  M2  Auth + Users          (SA-3)
+  M3  Books + Borrow        (SA-4)
+  M4  Notif + Recovery      (SA-6)
+  M5  Phase-3 Backend       (SA-5)
+  M6  Frontend Pages        (SA-7)
+  M7  Frontend Components   (SA-8)
+  M8  Playwright Verify     (Verifier — subagent_qa_regression.md)
+  M9  README + Polish       (SA-1+SA-6)
+  M10 REQUIREMENT AUDIT     (subagent_requirement_audit.md) — HARD GATE
 
 Create the support directory tree now:
   mkdir -p ai-rebuild/notes
   mkdir -p ai-rebuild/test-pack/smoke
   mkdir -p ai-rebuild/test-pack/results
   touch ai-rebuild/notes/decisions.md
+  touch ai-rebuild/notes/audit_failures.md
+
+==========================================================
+REQUIREMENT BINDING  (force-applied to every subagent brief)
+==========================================================
+Every subagent prompt you compose MUST end with this verbatim block, BEFORE
+the report-format JSON:
+
+  === REQUIREMENT BINDING (mandatory) ===
+  Open ai-rebuild/17_acceptance_checklist.md and grep for the rows where the
+  Owner column lists your SA-id (e.g. SA-4 or "SA-4+SA-8"). For each such REQ-*:
+    1. Read the corresponding section of ai-rebuild/16_full_requirements_verbatim.md.
+    2. Confirm your deliverable implements the requirement.
+    3. Run the verification (API/DB/UI/CODE/FILE) described in the checklist row.
+    4. Record the result in your report as: covered_reqs: ["REQ-001","REQ-002",...]
+  If any REQ-* in your scope cannot be satisfied, return status="blocked" with
+  blockers: [{ "req_id": "...", "reason": "..." }]. DO NOT silently skip it.
 
 ==========================================================
 SUBAGENT PROMPT FILE MAP  (read before Phase 2)
@@ -216,6 +266,27 @@ M9 (SA-1+SA-6): SA-6 replaces README.md stub with final content from 12_rebuild_
                 SA-1 confirms start.bat / stop.bat / status.bat work on the final structure.
                 Run full smoke replay and write release.log.
 
+M10 (Requirement Audit — HARD GATE):
+                Spawn the subagent using ai-rebuild/prompts/subagent_requirement_audit.md.
+                It walks every REQ-001..REQ-182 in ai-rebuild/17_acceptance_checklist.md and
+                writes ai-rebuild/test-pack/results/requirement_audit.log.
+
+                If the final line is `ALL REQUIREMENTS PASS (182/182)` → REBUILD ACCEPTED.
+
+                If the final line is `MISSING: <REQ-ids>`:
+                  a) Read ai-rebuild/notes/audit_failures.md.
+                  b) Group failures by Owner column (SA-3, SA-4, SA-5, SA-6, SA-7, SA-8).
+                  c) Re-spawn each affected subagent (use its prompt file from
+                     ai-rebuild/prompts/) with attempt=2 and the failure list pasted in.
+                     Their brief must say: "These REQ-* failed audit; fix and report
+                     covered_reqs again". The subagent fixes in its owned files only.
+                  d) After all subagents return, RE-SPAWN the M10 audit subagent.
+                  e) Repeat until ALL REQUIREMENTS PASS.
+
+                Maximum 5 audit cycles. After cycle 5, write a final BLOCKER entry
+                to ai-rebuild/notes/decisions.md with the persistent failing REQ ids
+                and pause for user review.
+
 ==========================================================
 FAILURE-HANDLING PROTOCOL
 ==========================================================
@@ -305,11 +376,14 @@ Final line of each log: ALL GREEN  or  FAILED: <count> tests.
 ==========================================================
 PHASE 4 — REPORT
 ==========================================================
-When SC-1 through SC-10 from 00_mission.md §2 all pass:
+When SC-1 through SC-11 from 00_mission.md §2 all pass
+(SC-11 = M10 Requirement Audit returns ALL REQUIREMENTS PASS):
 
   1. Print the SC table with each row marked PASS or FAIL.
+     Include SC-11 with the audit pass count (e.g. "SC-11: PASS 182/182").
   2. Print any entries from ai-rebuild/notes/decisions.md.
-  3. Hand off:
+  3. Print the final line of ai-rebuild/test-pack/results/requirement_audit.log.
+  4. Hand off:
        "Rebuild complete.
         Windows: run start.bat from the project root.
         POSIX:   cd backend && npm start   (terminal 1)
@@ -354,8 +428,13 @@ CONTEXT-BUDGET RULES
 ==========================================================
 START
 ==========================================================
-Begin Phase 0 now. Read all 23 files listed above. Print your CONTEXT-LOCK summary.
+Begin Phase 0 now. Read all 24 files listed above. Print your CONTEXT-LOCK summary.
 Then proceed to Phase 1 (TodoWrite plan). Then begin Phase 2 at M0.
+
+DO NOT report the rebuild complete until M10 returns ALL REQUIREMENTS PASS (182/182).
+DO NOT mark any subagent DONE if it did not return a covered_reqs list mapping to
+17_acceptance_checklist.md owners. Reject and re-spawn any subagent that returns
+empty covered_reqs for its owned scope.
 MASTER_PROMPT>>>
 ```
 
@@ -401,8 +480,13 @@ Return this JSON verbatim:
   "deps_added": ["pkg@version"] | [],
   "gates_passed": ["<id>", ...],
   "gates_failed": [{ "id": "...", "evidence": "<first 5 lines of failure>" }],
-  "decisions_logged": ["<one-line entry appended to decisions.md>"] | [],
-  "blockers": ["..."] | []
+  "covered_reqs": ["REQ-001","REQ-002", ...],     // MANDATORY — list every REQ-* in
+                                                  // 17_acceptance_checklist.md whose
+                                                  // Owner column lists your SA-id
+  "uncovered_reqs": ["REQ-XYZ"] | [],             // anything in your scope you could
+                                                  // NOT implement — must be empty for status=complete
+  "decisions_logged": ["<one-line entry>"] | [],
+  "blockers": [{ "req_id": "...", "reason": "..." }] | []
 }
 SUBAGENT_BRIEF>>>
 ```

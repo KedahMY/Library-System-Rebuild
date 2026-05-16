@@ -1,936 +1,887 @@
+// BiblioVault LibrarianPortal — 10-tab portal for librarian role.
+// Tabs: pending, all, manage-books, requests, downloaded-stats, flagged-reviews,
+//        users, borrow-records, notifications, profile.
+// Path: /librarian
+
 import React, { useState, useEffect, useCallback } from 'react';
-import { useAuth } from '../context/AuthContext';
-import { useRecovery } from '../App';
-import { useSessionRecorder } from '../components/CrashRecovery';
-import Sidebar from '../components/Sidebar';
-import ManageRequests from '../components/ManageRequests';
-import ManagePublishedBooks from '../components/ManagePublishedBooks';
-import DownloadedStats from '../components/DownloadedStats';
-import NotificationBoard from '../components/NotificationBoard';
-import ProfileEditor from '../components/ProfileEditor';
-import api from '../utils/api';
+import api from '../utils/api.js';
+import { useAuth, useRecovery } from '../context/AuthContext.jsx';
+import { useSessionRecorder, CrashTestButton, CrashUnrecoverableButton, SIMULATE_UNRECOVERABLE_CRASH } from '../components/CrashRecovery.jsx';
+import ManagePublishedBooks from '../components/ManagePublishedBooks.jsx';
+import ManageRequests from '../components/ManageRequests.jsx';
+import DownloadedStats from '../components/DownloadedStats.jsx';
+import NotificationBoard from '../components/NotificationBoard.jsx';
+import ProfileEditor from '../components/ProfileEditor.jsx';
 
-// EXACT tab ids — crash recovery keys depend on these
+// ── Tab navigation items (exact ids per 06_screen_flow.md) ───────────────────
 const NAV_ITEMS = [
-  { id: 'pending', label: 'Pending', icon: '⏳' },
-  { id: 'all', label: 'All Books', icon: '📚' },
-  { id: 'manage-books', label: 'Manage Books', icon: '⚙️' },
-  { id: 'requests', label: 'Requests', icon: '📋' },
-  { id: 'downloaded-stats', label: 'Downloads', icon: '📥' },
-  { id: 'flagged-reviews', label: 'Flagged Reviews', icon: '🚩' },
-  { id: 'users', label: 'Users', icon: '👥' },
-  { id: 'borrow-records', label: 'Borrow Records', icon: '📋' },
-  { id: 'notifications', label: 'Notifications', icon: '🔔' },
-  { id: 'profile', label: 'Profile', icon: '👤' }
+  { id: 'pending',          label: 'Pending Submissions', icon: '⏳' },
+  { id: 'all',              label: 'All Submissions',     icon: '📋' },
+  { id: 'manage-books',     label: 'Manage Books',        icon: '📚' },
+  { id: 'requests',         label: 'Book Requests',       icon: '📨' },
+  { id: 'downloaded-stats', label: 'Downloaded Stats',    icon: '📊' },
+  { id: 'flagged-reviews',  label: 'Flagged Reviews',     icon: '🚩' },
+  { id: 'users',            label: 'Manage Users',        icon: '👥' },
+  { id: 'borrow-records',   label: 'Borrow Records',      icon: '📒' },
+  { id: 'notifications',    label: 'Notifications',       icon: '🔔' },
+  { id: 'profile',          label: 'My Profile',          icon: '👤' },
 ];
-
-const STATUS_BADGE = (status) => {
-  const map = {
-    pending: { background: '#fff3e0', color: '#e65100' },
-    approved: { background: '#e8f5e9', color: '#2e7d32' },
-    rejected: { background: '#fdecea', color: '#c62828' },
-    active: { background: '#e3f2fd', color: '#1565c0' },
-    returned: { background: '#e8f5e9', color: '#2e7d32' },
-    overdue: { background: '#fdecea', color: '#c62828' },
-    inactive: { background: '#f5f5f5', color: '#999' }
-  };
-  return map[status] || { background: '#f5f0eb', color: '#666' };
-};
 
 export default function LibrarianPortal() {
   const { user } = useAuth();
   const { recoveryState, clearRecoveryState } = useRecovery();
+  const [activeTab, setActiveTab] = useState(
+    recoveryState?.activeTab || 'pending'
+  );
 
-  // ---- Tab state with crash recovery ----
-  const [activeTab, setActiveTab] = useState('pending');
+  // ── State snapshot fields (per 06_screen_flow.md §6.1) ─────────────────────
+  const [filters, setFilters] = useState(
+    recoveryState?.stateSnapshot?.filters || { title: '', author: '', genre: '', status: '', dateFrom: '', dateTo: '' }
+  );
+  const [userFilters, setUserFilters] = useState(
+    recoveryState?.stateSnapshot?.userFilters || { role: '', search: '' }
+  );
+  const [borrowFilters, setBorrowFilters] = useState(
+    recoveryState?.stateSnapshot?.borrowFilters || { search: '', status: '', dateFrom: '', dateTo: '' }
+  );
+  const [notifFilter, setNotifFilter] = useState(
+    recoveryState?.stateSnapshot?.notifFilter || { category: '', priority: '', search: '' }
+  );
+  const [notifShowArchived, setNotifShowArchived] = useState(
+    recoveryState?.stateSnapshot?.notifShowArchived || false
+  );
 
-  // ---- Snapshot fields ----
-  const [filters, setFilters] = useState({ search: '', genre: '', status: '' });
-  const [userFilters, setUserFilters] = useState({ search: '', role: '', status: '' });
-  const [borrowFilters, setBorrowFilters] = useState({ search: '', status: '', dateFrom: '', dateTo: '' });
-  const [notifFilter, setNotifFilter] = useState('all');
-  const [notifShowArchived, setNotifShowArchived] = useState(false);
-
-  // ---- Pending tab state ----
-  const [pendingBooks, setPendingBooks] = useState([]);
-  const [pendingLoading, setPendingLoading] = useState(false);
-  const [pendingError, setPendingError] = useState(null);
-  const [selectedPending, setSelectedPending] = useState([]);
-  const [previewBook, setPreviewBook] = useState(null);
-
-  // ---- Flagged reviews tab state ----
-  const [flaggedReviews, setFlaggedReviews] = useState([]);
-  const [flaggedLoading, setFlaggedLoading] = useState(false);
-  const [flaggedError, setFlaggedError] = useState(null);
-
-  // ---- Users tab state ----
-  const [users, setUsers] = useState([]);
-  const [usersLoading, setUsersLoading] = useState(false);
-  const [usersError, setUsersError] = useState(null);
-  const [createUserForm, setCreateUserForm] = useState({
-    username: '', email: '', password: '', full_name: '', role: 'student'
-  });
-  const [createUserSubmitting, setCreateUserSubmitting] = useState(false);
-  const [createUserError, setCreateUserError] = useState(null);
-  const [createUserSuccess, setCreateUserSuccess] = useState(null);
-  const [showCreateUser, setShowCreateUser] = useState(false);
-  const [bulkActionMsg, setBulkActionMsg] = useState(null);
-
-  // ---- Borrow records tab state ----
-  const [borrowRecords, setBorrowRecords] = useState([]);
-  const [borrowRecordsLoading, setBorrowRecordsLoading] = useState(false);
-  const [borrowRecordsError, setBorrowRecordsError] = useState(null);
-
-  // ---- Restore from crash recovery ----
+  // Clear recovery state after restoring (first render)
   useEffect(() => {
-    if (recoveryState && recoveryState.portal === 'librarian') {
-      if (recoveryState.activeTab) {
-        setActiveTab(recoveryState.activeTab);
-      }
-      if (recoveryState.stateSnapshot) {
-        const snap = recoveryState.stateSnapshot;
-        if (snap.filters !== undefined) setFilters(snap.filters);
-        if (snap.userFilters !== undefined) setUserFilters(snap.userFilters);
-        if (snap.borrowFilters !== undefined) setBorrowFilters(snap.borrowFilters);
-        if (snap.notifFilter !== undefined) setNotifFilter(snap.notifFilter);
-        if (snap.notifShowArchived !== undefined) setNotifShowArchived(snap.notifShowArchived);
-      }
+    if (recoveryState) {
       clearRecoveryState();
     }
-  }, [recoveryState, clearRecoveryState]);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ---- Session recorder ----
-  const stateSnapshot = { filters, userFilters, borrowFilters, notifFilter, notifShowArchived };
-  useSessionRecorder(user?.id, 'librarian', activeTab, stateSnapshot);
+  // Pending submissions
+  const [pendingBooks, setPendingBooks] = useState([]);
+  const [pendingLoading, setPendingLoading] = useState(false);
+  const [selectedPending, setSelectedPending] = useState([]);
 
-  // ---- Data fetching ----
+  // All submissions
+  const [allBooks, setAllBooks] = useState([]);
+  const [allBooksLoading, setAllBooksLoading] = useState(false);
 
-  // Pending books
+  // Flagged reviews
+  const [flaggedReviews, setFlaggedReviews] = useState([]);
+  const [flaggedLoading, setFlaggedLoading] = useState(false);
+
+  // Users
+  const [users, setUsers] = useState([]);
+  const [usersLoading, setUsersLoading] = useState(false);
+
+  // Borrow records
+  const [borrowRecords, setBorrowRecords] = useState([]);
+  const [borrowLoading, setBorrowLoading] = useState(false);
+
+  // ── Session recorder ───────────────────────────────────────────────────────
+  useSessionRecorder('librarian', activeTab, {
+    filters, userFilters, borrowFilters, notifFilter, notifShowArchived,
+  }, user?.id);
+
+  // ── Fetch pending submissions ──────────────────────────────────────────────
   const fetchPending = useCallback(async () => {
     setPendingLoading(true);
-    setPendingError(null);
     try {
-      const res = await api.get('/books/pending');
-      setPendingBooks(res.data.books || res.data || []);
+      const params = new URLSearchParams();
+      if (filters.title) params.append('title', filters.title);
+      if (filters.author) params.append('author', filters.author);
+      if (filters.genre) params.append('genre', filters.genre);
+      if (filters.status) params.append('status', filters.status);
+      if (filters.dateFrom) params.append('date_from', filters.dateFrom);
+      if (filters.dateTo) params.append('date_to', filters.dateTo);
+      const res = await api.get(`/books/pending?${params.toString()}`);
+      setPendingBooks(res.data || []);
     } catch (err) {
-      setPendingError(err.response?.data?.error || 'Failed to load pending books');
+      console.error('Failed to load pending:', err);
     } finally {
       setPendingLoading(false);
+    }
+  }, [filters]);
+
+  useEffect(() => {
+    if (activeTab === 'pending') {
+      fetchPending();
+    }
+  }, [activeTab, fetchPending]);
+
+  // ── Fetch all submissions ──────────────────────────────────────────────────
+  const fetchAllBooks = useCallback(async () => {
+    setAllBooksLoading(true);
+    try {
+      const res = await api.get('/librarian/books');
+      setAllBooks(res.data?.books || res.data || []);
+    } catch (err) {
+      console.error('Failed to load all books:', err);
+    } finally {
+      setAllBooksLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    if (activeTab === 'pending') fetchPending();
-  }, [fetchPending, activeTab]);
+    if (activeTab === 'all') {
+      fetchAllBooks();
+    }
+  }, [activeTab, fetchAllBooks]);
 
-  // Flagged reviews
+  // ── Fetch flagged reviews ─────────────────────────────────────────────────
   const fetchFlaggedReviews = useCallback(async () => {
     setFlaggedLoading(true);
-    setFlaggedError(null);
     try {
       const res = await api.get('/reviews/flagged');
-      setFlaggedReviews(res.data.reviews || res.data || []);
+      setFlaggedReviews(res.data || []);
     } catch (err) {
-      setFlaggedError(err.response?.data?.error || 'Failed to load flagged reviews');
+      console.error('Failed to load flagged reviews:', err);
     } finally {
       setFlaggedLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    if (activeTab === 'flagged-reviews') fetchFlaggedReviews();
-  }, [fetchFlaggedReviews, activeTab]);
+    if (activeTab === 'flagged-reviews') {
+      fetchFlaggedReviews();
+    }
+  }, [activeTab, fetchFlaggedReviews]);
 
-  // Users
+  // ── Fetch users ────────────────────────────────────────────────────────────
   const fetchUsers = useCallback(async () => {
     setUsersLoading(true);
-    setUsersError(null);
     try {
-      const params = {};
-      if (userFilters.search) params.search = userFilters.search;
-      if (userFilters.role) params.role = userFilters.role;
-      if (userFilters.status) params.status = userFilters.status;
-      const res = await api.get('/users', { params });
-      setUsers(res.data.users || res.data || []);
+      const params = new URLSearchParams();
+      if (userFilters.role) params.append('role', userFilters.role);
+      if (userFilters.search) params.append('search', userFilters.search);
+      const res = await api.get(`/users?${params.toString()}`);
+      setUsers(res.data?.users || res.data || []);
     } catch (err) {
-      setUsersError(err.response?.data?.error || 'Failed to load users');
+      console.error('Failed to load users:', err);
     } finally {
       setUsersLoading(false);
     }
   }, [userFilters]);
 
   useEffect(() => {
-    if (activeTab === 'users') fetchUsers();
-  }, [fetchUsers, activeTab]);
+    if (activeTab === 'users') {
+      fetchUsers();
+    }
+  }, [activeTab, fetchUsers]);
 
-  // Borrow records
+  // ── Fetch borrow records ──────────────────────────────────────────────────
   const fetchBorrowRecords = useCallback(async () => {
-    setBorrowRecordsLoading(true);
-    setBorrowRecordsError(null);
+    setBorrowLoading(true);
     try {
-      const params = {};
-      if (borrowFilters.search) params.search = borrowFilters.search;
-      if (borrowFilters.status) params.status = borrowFilters.status;
-      if (borrowFilters.dateFrom) params.date_from = borrowFilters.dateFrom;
-      if (borrowFilters.dateTo) params.date_to = borrowFilters.dateTo;
-      const res = await api.get('/books/borrow-records', { params });
-      setBorrowRecords(res.data.records || res.data || []);
+      const params = new URLSearchParams();
+      if (borrowFilters.search) params.append('search', borrowFilters.search);
+      if (borrowFilters.status) params.append('status', borrowFilters.status);
+      if (borrowFilters.dateFrom) params.append('date_from', borrowFilters.dateFrom);
+      if (borrowFilters.dateTo) params.append('date_to', borrowFilters.dateTo);
+      const res = await api.get(`/books/borrow-records?${params.toString()}`);
+      setBorrowRecords(res.data?.records || res.data || []);
     } catch (err) {
-      setBorrowRecordsError(err.response?.data?.error || 'Failed to load borrow records');
+      console.error('Failed to load borrow records:', err);
     } finally {
-      setBorrowRecordsLoading(false);
+      setBorrowLoading(false);
     }
   }, [borrowFilters]);
 
   useEffect(() => {
-    if (activeTab === 'borrow-records') fetchBorrowRecords();
-  }, [fetchBorrowRecords, activeTab]);
-
-  // ---- Handlers ----
-
-  // Pending actions
-  const handlePendingSelect = (id) => {
-    setSelectedPending(prev =>
-      prev.includes(id) ? prev.filter(bid => bid !== id) : [...prev, id]
-    );
-  };
-
-  const handlePendingSelectAll = () => {
-    if (selectedPending.length === pendingBooks.length) {
-      setSelectedPending([]);
-    } else {
-      setSelectedPending(pendingBooks.map(b => b.id));
+    if (activeTab === 'borrow-records') {
+      fetchBorrowRecords();
     }
-  };
+  }, [activeTab, fetchBorrowRecords]);
 
-  const handleApprove = async (id) => {
-    try {
-      await api.patch(`/books/${id}/approve`);
-      fetchPending();
-      setSelectedPending(prev => prev.filter(bid => bid !== id));
-    } catch (err) {
-      setPendingError(err.response?.data?.error || 'Failed to approve book');
-    }
-  };
-
-  const handleReject = async (id) => {
-    try {
-      await api.patch(`/books/${id}/reject`);
-      fetchPending();
-      setSelectedPending(prev => prev.filter(bid => bid !== id));
-    } catch (err) {
-      setPendingError(err.response?.data?.error || 'Failed to reject book');
-    }
-  };
-
-  const handleBulkApprove = async () => {
-    if (selectedPending.length === 0) return;
-    try {
-      await Promise.all(selectedPending.map(id => api.patch(`/books/${id}/approve`)));
-      setSelectedPending([]);
-      fetchPending();
-    } catch (err) {
-      setPendingError(err.response?.data?.error || 'Failed to bulk approve');
-    }
-  };
-
-  const handleBulkReject = async () => {
-    if (selectedPending.length === 0) return;
-    try {
-      await Promise.all(selectedPending.map(id => api.patch(`/books/${id}/reject`)));
-      setSelectedPending([]);
-      fetchPending();
-    } catch (err) {
-      setPendingError(err.response?.data?.error || 'Failed to bulk reject');
-    }
-  };
-
-  // Flagged reviews actions
-  const handleResolveFlag = async (reviewId) => {
-    try {
-      await api.post(`/reviews/${reviewId}/resolve-flag`);
-      fetchFlaggedReviews();
-    } catch (err) {
-      setFlaggedError(err.response?.data?.error || 'Failed to resolve flag');
-    }
-  };
-
-  // User actions
-  const handleToggleUserActive = async (userId, currentActive) => {
-    try {
-      const action = currentActive ? 'deactivate' : 'activate';
-      await api.post(`/users/${userId}/${action}`);
-      fetchUsers();
-    } catch (err) {
-      setUsersError(err.response?.data?.error || 'Failed to toggle user status');
-    }
-  };
-
-  const handleCreateUser = async (e) => {
-    e.preventDefault();
-    if (!createUserForm.username.trim() || !createUserForm.email.trim() || !createUserForm.password.trim()) {
-      setCreateUserError('Username, email, and password are required');
-      return;
-    }
-    setCreateUserSubmitting(true);
-    setCreateUserError(null);
-    setCreateUserSuccess(null);
-    try {
-      await api.post('/users', createUserForm);
-      setCreateUserSuccess('User created successfully');
-      setCreateUserForm({ username: '', email: '', password: '', full_name: '', role: 'student' });
-      fetchUsers();
-    } catch (err) {
-      setCreateUserError(err.response?.data?.error || 'Failed to create user');
-    } finally {
-      setCreateUserSubmitting(false);
-    }
-  };
-
+  // ── Bulk approve/reject ────────────────────────────────────────────────────
   const handleBulkAction = async (action) => {
-    if (!window.confirm(`Perform "${action}" on all users?`)) return;
-    try {
-      const params = {};
-      if (userFilters.role) params.role = userFilters.role;
-      if (userFilters.status) params.status = userFilters.status;
-      const res = await api.post('/librarian/users/bulk-action', { action, ...params });
-      setBulkActionMsg(res.data.message || `Bulk action "${action}" completed`);
-      fetchUsers();
-    } catch (err) {
-      setUsersError(err.response?.data?.error || 'Bulk action failed');
-    }
-  };
+    if (selectedPending.length === 0) return;
+    const confirmed = window.confirm(`Are you sure you want to ${action} ${selectedPending.length} selected submission(s)?`);
+    if (!confirmed) return;
 
-  // Borrow records actions
-  const handleExportCSV = async () => {
     try {
-      const params = {};
-      if (borrowFilters.search) params.search = borrowFilters.search;
-      if (borrowFilters.status) params.status = borrowFilters.status;
-      if (borrowFilters.dateFrom) params.date_from = borrowFilters.dateFrom;
-      if (borrowFilters.dateTo) params.date_to = borrowFilters.dateTo;
-      const res = await api.get('/books/borrow-records/export', {
-        params,
-        responseType: 'blob'
+      await api.post('/books/bulk-action', {
+        book_ids: selectedPending,
+        action,
       });
-      const url = window.URL.createObjectURL(new Blob([res.data]));
-      const link = document.createElement('a');
-      link.href = url;
-      link.setAttribute('download', 'borrow-records.csv');
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      window.URL.revokeObjectURL(url);
+      alert(`${action} successful!`);
+      setSelectedPending([]);
+      fetchPending();
     } catch (err) {
-      setBorrowRecordsError('Failed to export CSV');
+      alert(err.response?.data?.error || `Failed to ${action}`);
     }
   };
 
-  // ---- Tab content rendering ----
-  const renderTabContent = useCallback(() => {
+  // ── Render helpers ─────────────────────────────────────────────────────────
+  const renderTabContent = () => {
     switch (activeTab) {
       case 'pending':
-        return (
-          <div>
-            <h2 style={{ marginBottom: '1rem' }}>Pending Books</h2>
-            {pendingError && (
-              <div style={{ padding: '8px 12px', marginBottom: '1rem', background: '#fdecea', color: '#c62828', borderRadius: 4, fontSize: 13, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <span>{pendingError}</span>
-                <button onClick={() => setPendingError(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#c62828' }}>x</button>
-              </div>
-            )}
+        return renderPendingTab();
+      case 'all':
+        return renderAllSubmissionsTab();
+      case 'manage-books':
+        return renderLazyComponent('ManagePublishedBooks', { mode: 'manage-books' });
+      case 'requests':
+        return renderLazyComponent('ManageRequests');
+      case 'downloaded-stats':
+        return renderLazyComponent('DownloadedStats', { userId: user?.id });
+      case 'flagged-reviews':
+        return renderFlaggedReviewsTab();
+      case 'users':
+        return renderUsersTab();
+      case 'borrow-records':
+        return renderBorrowRecordsTab();
+      case 'notifications':
+        return renderLazyComponent('NotificationBoard');
+      case 'profile':
+        return renderLazyComponent('ProfileEditor');
+      default:
+        return <div style={{ color: '#666', padding: '2rem' }}>Select a tab.</div>;
+    }
+  };
 
-            {/* Bulk actions */}
-            {selectedPending.length > 0 && (
-              <div style={{ marginBottom: '1rem', display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-                <span style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>
-                  {selectedPending.length} selected
-                </span>
-                <button className="btn btn-primary" style={{ padding: '4px 12px', fontSize: '0.85rem' }} onClick={handleBulkApprove}>
-                  Approve All Selected
-                </button>
-                <button className="btn btn-outline" style={{ padding: '4px 12px', fontSize: '0.85rem', color: '#c62828', borderColor: '#c62828' }} onClick={handleBulkReject}>
-                  Reject All Selected
-                </button>
-              </div>
-            )}
+  function renderLazyComponent(name, props = {}) {
+    const Component = lazyComponentMap[name];
+    if (Component) {
+      return <Component {...props} />;
+    }
+    return (
+      <div style={{
+        textAlign: 'center', padding: '3rem', color: '#999',
+        fontFamily: 'DM Sans, sans-serif',
+      }}>
+        <div style={{ fontSize: '2rem', marginBottom: '1rem' }}>📄</div>
+        <div style={{ fontSize: '1rem' }}>{name} — loading...</div>
+      </div>
+    );
+  }
 
-            {pendingLoading ? (
-              <div className="card" style={{ padding: '3rem', textAlign: 'center', color: 'var(--color-text-muted)' }}>Loading pending books...</div>
-            ) : pendingBooks.length === 0 ? (
-              <div className="card" style={{ padding: '3rem', textAlign: 'center', color: 'var(--color-text-muted)' }}>
-                No books awaiting approval.
-              </div>
-            ) : (
-              <div style={{ overflowX: 'auto' }}>
-                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-                  <thead>
-                    <tr style={{ background: '#1a1a2e', color: '#fff' }}>
-                      <th style={{ padding: 8, textAlign: 'center', width: 36 }}>
-                        <input type="checkbox" checked={selectedPending.length === pendingBooks.length && pendingBooks.length > 0} onChange={handlePendingSelectAll} />
-                      </th>
-                      <th style={{ padding: 8, textAlign: 'left' }}>Title</th>
-                      <th style={{ padding: 8, textAlign: 'left' }}>Author</th>
-                      <th style={{ padding: 8, textAlign: 'left' }}>Genre</th>
-                      <th style={{ padding: 8, textAlign: 'center' }}>Submitted</th>
-                      <th style={{ padding: 8, textAlign: 'center' }}>Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {pendingBooks.map((book, i) => (
-                      <tr key={book.id} style={{ background: i % 2 === 0 ? '#fff' : '#f5f0eb' }}>
-                        <td style={{ padding: 8, textAlign: 'center' }}>
-                          <input type="checkbox" checked={selectedPending.includes(book.id)} onChange={() => handlePendingSelect(book.id)} />
-                        </td>
-                        <td style={{ padding: 8 }}>{book.title}</td>
-                        <td style={{ padding: 8 }}>{book.author || 'Unknown'}</td>
-                        <td style={{ padding: 8 }}>{book.genre || 'N/A'}</td>
-                        <td style={{ padding: 8, textAlign: 'center', fontSize: 12 }}>
-                          {book.created_at ? new Date(book.created_at).toLocaleDateString() : '-'}
-                        </td>
-                        <td style={{ padding: 8, textAlign: 'center' }}>
-                          <div style={{ display: 'flex', gap: '0.35rem', justifyContent: 'center' }}>
-                            <button
-                              className="btn btn-primary"
-                              style={{ padding: '4px 10px', fontSize: '0.8rem' }}
-                              onClick={() => handleApprove(book.id)}
-                            >
-                              Approve
-                            </button>
-                            <button
-                              className="btn btn-outline"
-                              style={{ padding: '4px 10px', fontSize: '0.8rem', color: '#c62828', borderColor: '#c62828' }}
-                              onClick={() => handleReject(book.id)}
-                            >
-                              Reject
-                            </button>
-                            <button
-                              style={{ padding: '4px 10px', fontSize: '0.8rem', background: 'none', border: '1px solid #ccc', borderRadius: 4, cursor: 'pointer' }}
-                              onClick={() => setPreviewBook(book)}
-                            >
-                              Preview
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
+  const panelStyle = {
+    fontFamily: 'DM Sans, sans-serif',
+    padding: '1.5rem',
+    maxWidth: '1100px',
+  };
 
-            {/* Preview modal */}
-            {previewBook && (
-              <div
-                onClick={() => setPreviewBook(null)}
+  // ── Pending Submissions tab ────────────────────────────────────────────────
+  function renderPendingTab() {
+    const statusStyles = {
+      pending: { bg: '#fff3e0', color: '#e65100' },
+      pending_deletion: { bg: '#fce4ec', color: '#880e4f' },
+      approved: { bg: '#e8f5e9', color: '#2e7d32' },
+      rejected: { bg: '#ffebee', color: '#c62828' },
+    };
+
+    const toggleSelect = (id) => {
+      setSelectedPending((prev) =>
+        prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+      );
+    };
+
+    return (
+      <div style={panelStyle}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+          <h2 style={{ fontFamily: 'Cormorant Garamond, serif', color: '#2c1810', margin: 0 }}>
+            Pending Submissions
+          </h2>
+          {selectedPending.length > 0 && (
+            <div style={{ display: 'flex', gap: '0.5rem' }}>
+              <button
+                onClick={() => handleBulkAction('approve')}
                 style={{
-                  position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
-                  background: 'rgba(0,0,0,0.5)', display: 'flex',
-                  alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 20
+                  padding: '0.4rem 1rem', background: '#2e7d32', color: '#fff',
+                  border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '0.85rem',
                 }}
               >
-                <div onClick={(e) => e.stopPropagation()} className="card" style={{ maxWidth: 500, width: '100%', padding: '1.5rem', maxHeight: '80vh', overflow: 'auto' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
-                    <h3 style={{ margin: 0, fontSize: '1.2rem' }}>{previewBook.title}</h3>
-                    <button onClick={() => setPreviewBook(null)} style={{ background: 'none', border: 'none', fontSize: 20, cursor: 'pointer', color: '#999' }}>&times;</button>
-                  </div>
-                  {previewBook.author && <p style={{ margin: '0 0 0.5rem', color: 'var(--color-text-muted)' }}>by {previewBook.author}</p>}
-                  {previewBook.genre && (
-                    <span style={{ padding: '2px 8px', borderRadius: 4, fontSize: 11, background: '#f5f0eb', color: '#666', marginRight: 4 }}>
-                      {previewBook.genre}
-                    </span>
-                  )}
-                  <span style={{
-                    padding: '2px 8px', borderRadius: 4, fontSize: 11,
-                    ...STATUS_BADGE(previewBook.status)
+                Approve ({selectedPending.length})
+              </button>
+              <button
+                onClick={() => handleBulkAction('reject')}
+                style={{
+                  padding: '0.4rem 1rem', background: '#c62828', color: '#fff',
+                  border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '0.85rem',
+                }}
+              >
+                Reject ({selectedPending.length})
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Filters */}
+        <div style={{
+          display: 'flex', gap: '0.75rem', marginBottom: '1.25rem',
+          flexWrap: 'wrap', alignItems: 'center',
+        }}>
+          <input type="text" placeholder="Title..." value={filters.title}
+            onChange={(e) => setFilters((f) => ({ ...f, title: e.target.value }))}
+            style={{ padding: '0.4rem 0.5rem', border: '1px solid #ccc', borderRadius: '4px', fontSize: '0.85rem', width: '130px' }} />
+          <input type="text" placeholder="Author..." value={filters.author}
+            onChange={(e) => setFilters((f) => ({ ...f, author: e.target.value }))}
+            style={{ padding: '0.4rem 0.5rem', border: '1px solid #ccc', borderRadius: '4px', fontSize: '0.85rem', width: '130px' }} />
+          <select value={filters.genre} onChange={(e) => setFilters((f) => ({ ...f, genre: e.target.value }))}
+            style={{ padding: '0.4rem 0.5rem', border: '1px solid #ccc', borderRadius: '4px', fontSize: '0.85rem' }}>
+            <option value="">All Genres</option>
+            {['Fiction', 'Non-Fiction', 'Science Fiction', 'Fantasy', 'Mystery',
+              'Romance', 'Thriller', 'Horror', 'Biography', 'History',
+              'Science', 'Technology', 'Philosophy', 'Poetry', 'Drama', 'Comics',
+            ].map((g) => (
+              <option key={g} value={g}>{g}</option>
+            ))}
+          </select>
+          <select value={filters.status} onChange={(e) => setFilters((f) => ({ ...f, status: e.target.value }))}
+            style={{ padding: '0.4rem 0.5rem', border: '1px solid #ccc', borderRadius: '4px', fontSize: '0.85rem' }}>
+            <option value="">All Status</option>
+            <option value="pending">Pending</option>
+            <option value="approved">Approved</option>
+            <option value="rejected">Rejected</option>
+            <option value="pending_deletion">Pending Deletion</option>
+          </select>
+          <input type="date" value={filters.dateFrom} onChange={(e) => setFilters((f) => ({ ...f, dateFrom: e.target.value }))}
+            style={{ padding: '0.35rem 0.5rem', border: '1px solid #ccc', borderRadius: '4px', fontSize: '0.85rem' }} />
+          <input type="date" value={filters.dateTo} onChange={(e) => setFilters((f) => ({ ...f, dateTo: e.target.value }))}
+            style={{ padding: '0.35rem 0.5rem', border: '1px solid #ccc', borderRadius: '4px', fontSize: '0.85rem' }} />
+        </div>
+
+        {/* Books table */}
+        {pendingLoading ? (
+          <div style={{ color: '#666' }}>Loading submissions...</div>
+        ) : pendingBooks.length === 0 ? (
+          <div style={{ textAlign: 'center', color: '#999', padding: '3rem' }}>
+            No pending submissions.
+          </div>
+        ) : (
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem' }}>
+              <thead>
+                <tr style={{ background: '#f5f5f5', borderBottom: '2px solid #e0d8c8' }}>
+                  <th style={{ width: '36px', padding: '0.5rem' }}>
+                    <input type="checkbox"
+                      onChange={(e) => {
+                        if (e.target.checked) {
+                          setSelectedPending(pendingBooks.map((b) => b.id));
+                        } else {
+                          setSelectedPending([]);
+                        }
+                      }}
+                      checked={selectedPending.length === pendingBooks.length && pendingBooks.length > 0}
+                    />
+                  </th>
+                  <th style={{ padding: '0.5rem 0.75rem', textAlign: 'left' }}>Title</th>
+                  <th style={{ padding: '0.5rem 0.75rem', textAlign: 'left' }}>Author</th>
+                  <th style={{ padding: '0.5rem 0.75rem', textAlign: 'left' }}>Genre</th>
+                  <th style={{ padding: '0.5rem 0.75rem', textAlign: 'left' }}>Status</th>
+                  <th style={{ padding: '0.5rem 0.75rem', textAlign: 'left' }}>Submitted</th>
+                  <th style={{ padding: '0.5rem 0.75rem', textAlign: 'center' }}>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pendingBooks.map((book, idx) => {
+                  const ss = statusStyles[book.status] || { bg: '#f5f5f5', color: '#666' };
+                  return (
+                    <tr key={book.id || idx} style={{
+                      borderBottom: '1px solid #eee',
+                      background: idx % 2 === 0 ? '#fff' : '#fafafa',
+                    }}>
+                      <td style={{ padding: '0.5rem', textAlign: 'center' }}>
+                        <input type="checkbox"
+                          checked={selectedPending.includes(book.id)}
+                          onChange={() => toggleSelect(book.id)}
+                        />
+                      </td>
+                      <td style={{ padding: '0.5rem 0.75rem', fontWeight: 500 }}>{book.title}</td>
+                      <td style={{ padding: '0.5rem 0.75rem' }}>{book.author_name}</td>
+                      <td style={{ padding: '0.5rem 0.75rem' }}>{book.genre}</td>
+                      <td style={{ padding: '0.5rem 0.75rem' }}>
+                        <span style={{
+                          display: 'inline-block', padding: '2px 8px', borderRadius: '3px',
+                          fontSize: '0.75rem', fontWeight: 'bold',
+                          background: ss.bg, color: ss.color,
+                        }}>
+                          {book.status}
+                        </span>
+                      </td>
+                      <td style={{ padding: '0.5rem 0.75rem', fontSize: '0.8rem', color: '#666' }}>
+                        {book.submitted_date ? new Date(book.submitted_date).toLocaleDateString() : ''}
+                      </td>
+                      <td style={{ padding: '0.5rem 0.75rem', textAlign: 'center' }}>
+                        <button
+                          onClick={async () => {
+                            if (!window.confirm(`Approve "${book.title}"?`)) return;
+                            try {
+                              await api.patch(`/books/${book.id}/approve`);
+                              fetchPending();
+                            } catch (err) {
+                              alert(err.response?.data?.error || 'Failed to approve');
+                            }
+                          }}
+                          style={{
+                            padding: '0.25rem 0.5rem', background: '#2e7d32', color: '#fff',
+                            border: 'none', borderRadius: '3px', cursor: 'pointer', fontSize: '0.75rem',
+                            marginRight: '0.25rem',
+                          }}
+                        >
+                          Approve
+                        </button>
+                        <button
+                          onClick={async () => {
+                            const reason = window.prompt('Rejection reason (optional):');
+                            if (reason !== null) {
+                              try {
+                                await api.patch(`/books/${book.id}/reject`, reason ? { rejection_reason: reason } : {});
+                                fetchPending();
+                              } catch (err) {
+                                alert(err.response?.data?.error || 'Failed to reject');
+                              }
+                            }
+                          }}
+                          style={{
+                            padding: '0.25rem 0.5rem', background: '#c62828', color: '#fff',
+                            border: 'none', borderRadius: '3px', cursor: 'pointer', fontSize: '0.75rem',
+                          }}
+                        >
+                          Reject
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ── All Submissions tab ────────────────────────────────────────────────────
+  function renderAllSubmissionsTab() {
+    return (
+      <div style={panelStyle}>
+        <h2 style={{ fontFamily: 'Cormorant Garamond, serif', color: '#2c1810', marginBottom: '1rem' }}>
+          All Submissions
+        </h2>
+        {allBooksLoading ? (
+          <div style={{ color: '#666' }}>Loading all books...</div>
+        ) : allBooks.length === 0 ? (
+          <div style={{ textAlign: 'center', color: '#999', padding: '3rem' }}>
+            No books found.
+          </div>
+        ) : (
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem' }}>
+              <thead>
+                <tr style={{ background: '#f5f5f5', borderBottom: '2px solid #e0d8c8' }}>
+                  <th style={{ padding: '0.5rem 0.75rem', textAlign: 'left' }}>Title</th>
+                  <th style={{ padding: '0.5rem 0.75rem', textAlign: 'left' }}>Author</th>
+                  <th style={{ padding: '0.5rem 0.75rem', textAlign: 'left' }}>Genre</th>
+                  <th style={{ padding: '0.5rem 0.75rem', textAlign: 'left' }}>Status</th>
+                  <th style={{ padding: '0.5rem 0.75rem', textAlign: 'left' }}>Availability</th>
+                  <th style={{ padding: '0.5rem 0.75rem', textAlign: 'left' }}>Submitted</th>
+                </tr>
+              </thead>
+              <tbody>
+                {allBooks.map((book, idx) => (
+                  <tr key={book.id || idx} style={{
+                    borderBottom: '1px solid #eee',
+                    background: idx % 2 === 0 ? '#fff' : '#fafafa',
                   }}>
-                    {previewBook.status}
-                  </span>
-                  {previewBook.description && (
-                    <p style={{ margin: '0.75rem 0', fontSize: '0.9rem', lineHeight: 1.5 }}>{previewBook.description}</p>
-                  )}
-                  {previewBook.file_url && (
-                    <p style={{ fontSize: '0.85rem' }}>
-                      <a href={previewBook.file_url} target="_blank" rel="noopener noreferrer">View PDF</a>
-                    </p>
-                  )}
-                </div>
-              </div>
-            )}
+                    <td style={{ padding: '0.5rem 0.75rem', fontWeight: 500 }}>{book.title}</td>
+                    <td style={{ padding: '0.5rem 0.75rem' }}>{book.author_name}</td>
+                    <td style={{ padding: '0.5rem 0.75rem' }}>{book.genre}</td>
+                    <td style={{ padding: '0.5rem 0.75rem' }}>
+                      <span style={{
+                        padding: '2px 8px', borderRadius: '3px', fontSize: '0.75rem', fontWeight: 'bold',
+                        background: book.status === 'approved' ? '#e8f5e9' : book.status === 'rejected' ? '#ffebee' : '#fff3e0',
+                        color: book.status === 'approved' ? '#2e7d32' : book.status === 'rejected' ? '#c62828' : '#e65100',
+                      }}>
+                        {book.status}
+                      </span>
+                    </td>
+                    <td style={{ padding: '0.5rem 0.75rem', fontSize: '0.8rem', color: '#666' }}>
+                      {book.availability || '-'}
+                    </td>
+                    <td style={{ padding: '0.5rem 0.75rem', fontSize: '0.8rem', color: '#666' }}>
+                      {book.submitted_date ? new Date(book.submitted_date).toLocaleDateString() : ''}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
-        );
+        )}
+      </div>
+    );
+  }
 
-      case 'all':
-        return (
-          <div>
-            <h2 style={{ marginBottom: '1rem' }}>All Books</h2>
-            <div style={{ display: 'flex', gap: '0.75rem', marginBottom: '1rem', flexWrap: 'wrap' }}>
-              <input
-                type="search"
-                placeholder="Search books..."
-                value={filters.search}
-                onChange={e => setFilters(prev => ({ ...prev, search: e.target.value }))}
-                style={{ flex: 1, minWidth: '200px' }}
-              />
-              <select
-                value={filters.genre}
-                onChange={e => setFilters(prev => ({ ...prev, genre: e.target.value }))}
-                style={{ width: '150px' }}
-              >
-                <option value="">All Genres</option>
-                <option value="fiction">Fiction</option>
-                <option value="non-fiction">Non-Fiction</option>
-                <option value="science">Science</option>
-                <option value="history">History</option>
-                <option value="technology">Technology</option>
-              </select>
-              <select
-                value={filters.status}
-                onChange={e => setFilters(prev => ({ ...prev, status: e.target.value }))}
-                style={{ width: '150px' }}
-              >
-                <option value="">All Status</option>
-                <option value="pending">Pending</option>
-                <option value="approved">Approved</option>
-                <option value="rejected">Rejected</option>
-              </select>
-            </div>
-            <ManagePublishedBooks mode="all" />
+  // ── Flagged Reviews tab ────────────────────────────────────────────────────
+  function renderFlaggedReviewsTab() {
+    return (
+      <div style={panelStyle}>
+        <h2 style={{ fontFamily: 'Cormorant Garamond, serif', color: '#2c1810', marginBottom: '1rem' }}>
+          Flagged Reviews
+        </h2>
+        {flaggedLoading ? (
+          <div style={{ color: '#666' }}>Loading flagged reviews...</div>
+        ) : flaggedReviews.length === 0 ? (
+          <div style={{ textAlign: 'center', color: '#999', padding: '3rem' }}>
+            No flagged reviews at this time.
           </div>
-        );
-
-      case 'manage-books':
-        return (
-          <div>
-            <h2 style={{ marginBottom: '1rem' }}>Manage Books</h2>
-            <ManagePublishedBooks mode="manage" />
+        ) : (
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem' }}>
+              <thead>
+                <tr style={{ background: '#f5f5f5', borderBottom: '2px solid #e0d8c8' }}>
+                  <th style={{ padding: '0.5rem 0.75rem', textAlign: 'left' }}>Reviewer</th>
+                  <th style={{ padding: '0.5rem 0.75rem', textAlign: 'left' }}>Book</th>
+                  <th style={{ padding: '0.5rem 0.75rem', textAlign: 'left' }}>Content</th>
+                  <th style={{ padding: '0.5rem 0.75rem', textAlign: 'center' }}>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {flaggedReviews.map((rev, idx) => (
+                  <tr key={rev.id || idx} style={{
+                    borderBottom: '1px solid #eee',
+                    background: idx % 2 === 0 ? '#fff' : '#fafafa',
+                  }}>
+                    <td style={{ padding: '0.5rem 0.75rem' }}>{rev.username || rev.reviewer_name || 'Unknown'}</td>
+                    <td style={{ padding: '0.5rem 0.75rem', fontWeight: 500 }}>{rev.book_title || 'Unknown'}</td>
+                    <td style={{ padding: '0.5rem 0.75rem', fontSize: '0.8rem', color: '#555', maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {rev.content || rev.review_text || ''}
+                    </td>
+                    <td style={{ padding: '0.5rem 0.75rem', textAlign: 'center' }}>
+                      <button
+                        onClick={async () => {
+                          try {
+                            await api.post(`/reviews/${rev.id}/resolve-flag`, { action: 'accept' });
+                            fetchFlaggedReviews();
+                          } catch (err) {
+                            alert(err.response?.data?.error || 'Failed');
+                          }
+                        }}
+                        style={{
+                          padding: '0.25rem 0.5rem', background: '#2e7d32', color: '#fff',
+                          border: 'none', borderRadius: '3px', cursor: 'pointer', fontSize: '0.75rem',
+                          marginRight: '0.25rem',
+                        }}
+                      >
+                        Accept
+                      </button>
+                      <button
+                        onClick={async () => {
+                          try {
+                            await api.post(`/reviews/${rev.id}/resolve-flag`, { action: 'reject' });
+                            fetchFlaggedReviews();
+                          } catch (err) {
+                            alert(err.response?.data?.error || 'Failed');
+                          }
+                        }}
+                        style={{
+                          padding: '0.25rem 0.5rem', background: '#888', color: '#fff',
+                          border: 'none', borderRadius: '3px', cursor: 'pointer', fontSize: '0.75rem',
+                        }}
+                      >
+                        Reject
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
-        );
+        )}
+      </div>
+    );
+  }
 
-      case 'requests':
-        return (
-          <div>
-            <h2 style={{ marginBottom: '1rem' }}>Borrow Requests</h2>
-            <ManageRequests />
+  // ── Manage Users tab ───────────────────────────────────────────────────────
+  function renderUsersTab() {
+    return (
+      <div style={panelStyle}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+          <h2 style={{ fontFamily: 'Cormorant Garamond, serif', color: '#2c1810', margin: 0 }}>
+            Manage Users
+          </h2>
+        </div>
+
+        {/* Filters */}
+        <div style={{ display: 'flex', gap: '0.75rem', marginBottom: '1rem', flexWrap: 'wrap' }}>
+          <input type="text" placeholder="Search by username or name..." value={userFilters.search}
+            onChange={(e) => setUserFilters((f) => ({ ...f, search: e.target.value }))}
+            style={{ padding: '0.4rem 0.5rem', border: '1px solid #ccc', borderRadius: '4px', fontSize: '0.85rem', flex: 1, minWidth: '150px' }} />
+          <select value={userFilters.role} onChange={(e) => setUserFilters((f) => ({ ...f, role: e.target.value }))}
+            style={{ padding: '0.4rem 0.5rem', border: '1px solid #ccc', borderRadius: '4px', fontSize: '0.85rem' }}>
+            <option value="">All Roles</option>
+            <option value="student">Student</option>
+            <option value="staff">Staff</option>
+            <option value="author">Author</option>
+            <option value="librarian">Librarian</option>
+          </select>
+        </div>
+
+        {usersLoading ? (
+          <div style={{ color: '#666' }}>Loading users...</div>
+        ) : users.length === 0 ? (
+          <div style={{ textAlign: 'center', color: '#999', padding: '3rem' }}>
+            No users found.
           </div>
-        );
-
-      case 'downloaded-stats':
-        return (
-          <div>
-            <h2 style={{ marginBottom: '1rem' }}>Download Statistics</h2>
-            <DownloadedStats />
+        ) : (
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem' }}>
+              <thead>
+                <tr style={{ background: '#f5f5f5', borderBottom: '2px solid #e0d8c8' }}>
+                  <th style={{ padding: '0.5rem 0.75rem', textAlign: 'left' }}>Username</th>
+                  <th style={{ padding: '0.5rem 0.75rem', textAlign: 'left' }}>Full Name</th>
+                  <th style={{ padding: '0.5rem 0.75rem', textAlign: 'left' }}>Role</th>
+                  <th style={{ padding: '0.5rem 0.75rem', textAlign: 'left' }}>Active</th>
+                  <th style={{ padding: '0.5rem 0.75rem', textAlign: 'left' }}>Last Login</th>
+                  <th style={{ padding: '0.5rem 0.75rem', textAlign: 'center' }}>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {users.map((u, idx) => (
+                  <tr key={u.id || idx} style={{
+                    borderBottom: '1px solid #eee',
+                    background: idx % 2 === 0 ? '#fff' : '#fafafa',
+                    opacity: u.active === 0 ? 0.6 : 1,
+                  }}>
+                    <td style={{ padding: '0.5rem 0.75rem', fontWeight: 500 }}>{u.username}</td>
+                    <td style={{ padding: '0.5rem 0.75rem' }}>{u.full_name}</td>
+                    <td style={{ padding: '0.5rem 0.75rem' }}>
+                      <span style={{
+                        padding: '2px 6px', borderRadius: '3px', fontSize: '0.75rem',
+                        background: '#e3f2fd', color: '#1565c0', fontWeight: 'bold',
+                      }}>
+                        {u.role}
+                      </span>
+                    </td>
+                    <td style={{ padding: '0.5rem 0.75rem' }}>
+                      {u.active !== 0 ? (
+                        <span style={{ color: '#2e7d32', fontWeight: 'bold' }}>Yes</span>
+                      ) : (
+                        <span style={{ color: '#c62828' }}>No</span>
+                      )}
+                    </td>
+                    <td style={{ padding: '0.5rem 0.75rem', fontSize: '0.8rem', color: '#666' }}>
+                      {u.last_login ? new Date(u.last_login).toLocaleDateString() : 'Never'}
+                    </td>
+                    <td style={{ padding: '0.5rem 0.75rem', textAlign: 'center' }}>
+                      <button
+                        onClick={async () => {
+                          try {
+                            await api.patch(`/users/${u.id}/deactivate`);
+                            fetchUsers();
+                          } catch (err) {
+                            alert(err.response?.data?.error || 'Failed to toggle');
+                          }
+                        }}
+                        style={{
+                          padding: '0.25rem 0.5rem',
+                          background: u.active !== 0 ? '#c62828' : '#2e7d32',
+                          color: '#fff', border: 'none', borderRadius: '3px',
+                          cursor: 'pointer', fontSize: '0.75rem',
+                        }}
+                      >
+                        {u.active !== 0 ? 'Deactivate' : 'Activate'}
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
-        );
+        )}
+      </div>
+    );
+  }
 
-      case 'flagged-reviews':
-        return (
-          <div>
-            <h2 style={{ marginBottom: '1rem' }}>Flagged Reviews</h2>
-            {flaggedError && (
-              <div style={{ padding: '8px 12px', marginBottom: '1rem', background: '#fdecea', color: '#c62828', borderRadius: 4, fontSize: 13, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <span>{flaggedError}</span>
-                <button onClick={() => setFlaggedError(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#c62828' }}>x</button>
-              </div>
-            )}
-            {flaggedLoading ? (
-              <div className="card" style={{ padding: '3rem', textAlign: 'center', color: 'var(--color-text-muted)' }}>Loading flagged reviews...</div>
-            ) : flaggedReviews.length === 0 ? (
-              <div className="card" style={{ padding: '3rem', textAlign: 'center', color: 'var(--color-text-muted)' }}>
-                No flagged reviews requiring moderation.
-              </div>
-            ) : (
-              <div style={{ overflowX: 'auto' }}>
-                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-                  <thead>
-                    <tr style={{ background: '#1a1a2e', color: '#fff' }}>
-                      <th style={{ padding: 8, textAlign: 'left' }}>Book</th>
-                      <th style={{ padding: 8, textAlign: 'left' }}>User</th>
-                      <th style={{ padding: 8, textAlign: 'left' }}>Review</th>
-                      <th style={{ padding: 8, textAlign: 'center' }}>Rating</th>
-                      <th style={{ padding: 8, textAlign: 'center' }}>Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {flaggedReviews.map((review, i) => (
-                      <tr key={review.id} style={{ background: i % 2 === 0 ? '#fff' : '#f5f0eb' }}>
-                        <td style={{ padding: 8 }}>{review.book_title || 'Unknown'}</td>
-                        <td style={{ padding: 8 }}>{review.username || 'Unknown'}</td>
-                        <td style={{ padding: 8, maxWidth: 300 }}>
-                          <div style={{ maxHeight: 60, overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                            {review.content || '(no content)'}
-                          </div>
-                        </td>
-                        <td style={{ padding: 8, textAlign: 'center' }}>{review.rating || '-'}</td>
-                        <td style={{ padding: 8, textAlign: 'center' }}>
-                          <button
-                            className="btn btn-primary"
-                            style={{ padding: '4px 10px', fontSize: '0.8rem' }}
-                            onClick={() => handleResolveFlag(review.id)}
-                          >
-                            Accept & Resolve
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
+  // ── Borrow Records tab ─────────────────────────────────────────────────────
+  function renderBorrowRecordsTab() {
+    return (
+      <div style={panelStyle}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+          <h2 style={{ fontFamily: 'Cormorant Garamond, serif', color: '#2c1810', margin: 0 }}>
+            Borrow Records
+          </h2>
+          <button
+            onClick={async () => {
+              try {
+                const res = await api.get('/books/borrow-records/export', { responseType: 'blob' });
+                const url = window.URL.createObjectURL(new Blob([res.data]));
+                const link = document.createElement('a');
+                link.href = url;
+                link.setAttribute('download', 'borrow-records.csv');
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+              } catch (err) {
+                alert('Failed to export');
+              }
+            }}
+            style={{
+              padding: '0.4rem 1rem', background: '#2c1810', color: '#fff',
+              border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '0.85rem',
+            }}
+          >
+            Export CSV
+          </button>
+        </div>
+
+        {/* Filters */}
+        <div style={{ display: 'flex', gap: '0.75rem', marginBottom: '1rem', flexWrap: 'wrap', alignItems: 'center' }}>
+          <input type="text" placeholder="Search by title or borrower..." value={borrowFilters.search}
+            onChange={(e) => setBorrowFilters((f) => ({ ...f, search: e.target.value }))}
+            style={{ padding: '0.4rem 0.5rem', border: '1px solid #ccc', borderRadius: '4px', fontSize: '0.85rem', flex: 1, minWidth: '150px' }} />
+          <select value={borrowFilters.status} onChange={(e) => setBorrowFilters((f) => ({ ...f, status: e.target.value }))}
+            style={{ padding: '0.4rem 0.5rem', border: '1px solid #ccc', borderRadius: '4px', fontSize: '0.85rem' }}>
+            <option value="">All Status</option>
+            <option value="active">Active</option>
+            <option value="returned">Returned</option>
+            <option value="overdue">Overdue</option>
+          </select>
+          <input type="date" value={borrowFilters.dateFrom} onChange={(e) => setBorrowFilters((f) => ({ ...f, dateFrom: e.target.value }))}
+            style={{ padding: '0.35rem 0.5rem', border: '1px solid #ccc', borderRadius: '4px', fontSize: '0.85rem' }} />
+          <input type="date" value={borrowFilters.dateTo} onChange={(e) => setBorrowFilters((f) => ({ ...f, dateTo: e.target.value }))}
+            style={{ padding: '0.35rem 0.5rem', border: '1px solid #ccc', borderRadius: '4px', fontSize: '0.85rem' }} />
+        </div>
+
+        {borrowLoading ? (
+          <div style={{ color: '#666' }}>Loading records...</div>
+        ) : borrowRecords.length === 0 ? (
+          <div style={{ textAlign: 'center', color: '#999', padding: '3rem' }}>
+            No borrow records found.
           </div>
-        );
-
-      case 'users':
-        return (
-          <div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-              <h2 style={{ margin: 0 }}>Users</h2>
-              <button
-                className="btn btn-primary"
-                onClick={() => setShowCreateUser(!showCreateUser)}
-              >
-                {showCreateUser ? 'Cancel' : '+ Create User'}
-              </button>
-            </div>
-
-            {/* Filters */}
-            <div style={{ display: 'flex', gap: '0.75rem', marginBottom: '1rem', flexWrap: 'wrap' }}>
-              <input
-                type="search"
-                placeholder="Search users..."
-                value={userFilters.search}
-                onChange={e => setUserFilters(prev => ({ ...prev, search: e.target.value }))}
-                style={{ flex: 1, minWidth: '200px' }}
-              />
-              <select
-                value={userFilters.role}
-                onChange={e => setUserFilters(prev => ({ ...prev, role: e.target.value }))}
-                style={{ width: '150px' }}
-              >
-                <option value="">All Roles</option>
-                <option value="student">Student</option>
-                <option value="staff">Staff</option>
-                <option value="author">Author</option>
-                <option value="librarian">Librarian</option>
-              </select>
-              <select
-                value={userFilters.status}
-                onChange={e => setUserFilters(prev => ({ ...prev, status: e.target.value }))}
-                style={{ width: '150px' }}
-              >
-                <option value="">All Status</option>
-                <option value="active">Active</option>
-                <option value="inactive">Inactive</option>
-              </select>
-            </div>
-
-            {/* Bulk actions */}
-            <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem', flexWrap: 'wrap' }}>
-              <button
-                className="btn btn-outline"
-                style={{ padding: '4px 12px', fontSize: '0.85rem' }}
-                onClick={() => handleBulkAction('export')}
-              >
-                Export All
-              </button>
-              <button
-                className="btn btn-outline"
-                style={{ padding: '4px 12px', fontSize: '0.85rem', color: '#c62828', borderColor: '#c62828' }}
-                onClick={() => handleBulkAction('deactivate_all')}
-              >
-                Deactivate All (Filtered)
-              </button>
-            </div>
-
-            {bulkActionMsg && (
-              <div style={{ padding: '8px 12px', marginBottom: '1rem', background: '#e8f5e9', color: '#2e7d32', borderRadius: 4, fontSize: 13 }}>
-                {bulkActionMsg}
-                <button onClick={() => setBulkActionMsg(null)} style={{ marginLeft: 8, background: 'none', border: 'none', cursor: 'pointer', color: '#2e7d32' }}>x</button>
-              </div>
-            )}
-
-            {usersError && (
-              <div style={{ padding: '8px 12px', marginBottom: '1rem', background: '#fdecea', color: '#c62828', borderRadius: 4, fontSize: 13, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <span>{usersError}</span>
-                <button onClick={() => setUsersError(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#c62828' }}>x</button>
-              </div>
-            )}
-
-            {/* Create User Form */}
-            {showCreateUser && (
-              <div className="card" style={{ padding: '1rem', marginBottom: '1rem' }}>
-                <h3 style={{ margin: '0 0 0.75rem', fontSize: '1rem' }}>Create New User</h3>
-                <form onSubmit={handleCreateUser}>
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '0.75rem' }}>
-                    <div>
-                      <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>Username *</label>
-                      <input
-                        value={createUserForm.username}
-                        onChange={e => setCreateUserForm(prev => ({ ...prev, username: e.target.value }))}
-                        placeholder="Username"
-                        style={{ width: '100%', padding: 8, border: '1px solid #ccc', borderRadius: 4, boxSizing: 'border-box' }}
-                      />
-                    </div>
-                    <div>
-                      <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>Email *</label>
-                      <input
-                        type="email"
-                        value={createUserForm.email}
-                        onChange={e => setCreateUserForm(prev => ({ ...prev, email: e.target.value }))}
-                        placeholder="Email"
-                        style={{ width: '100%', padding: 8, border: '1px solid #ccc', borderRadius: 4, boxSizing: 'border-box' }}
-                      />
-                    </div>
-                    <div>
-                      <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>Password *</label>
-                      <input
-                        type="password"
-                        value={createUserForm.password}
-                        onChange={e => setCreateUserForm(prev => ({ ...prev, password: e.target.value }))}
-                        placeholder="Password"
-                        style={{ width: '100%', padding: 8, border: '1px solid #ccc', borderRadius: 4, boxSizing: 'border-box' }}
-                      />
-                    </div>
-                    <div>
-                      <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>Full Name</label>
-                      <input
-                        value={createUserForm.full_name}
-                        onChange={e => setCreateUserForm(prev => ({ ...prev, full_name: e.target.value }))}
-                        placeholder="Full name"
-                        style={{ width: '100%', padding: 8, border: '1px solid #ccc', borderRadius: 4, boxSizing: 'border-box' }}
-                      />
-                    </div>
-                  </div>
-                  <div style={{ marginBottom: '0.75rem' }}>
-                    <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>Role</label>
-                    <select
-                      value={createUserForm.role}
-                      onChange={e => setCreateUserForm(prev => ({ ...prev, role: e.target.value }))}
-                      style={{ padding: 8, border: '1px solid #ccc', borderRadius: 4 }}
-                    >
-                      <option value="student">Student</option>
-                      <option value="staff">Staff</option>
-                      <option value="author">Author</option>
-                      <option value="librarian">Librarian</option>
-                    </select>
-                  </div>
-                  {createUserError && (
-                    <div style={{ padding: '6px 10px', marginBottom: '0.5rem', background: '#fdecea', color: '#c62828', borderRadius: 4, fontSize: 12 }}>{createUserError}</div>
-                  )}
-                  {createUserSuccess && (
-                    <div style={{ padding: '6px 10px', marginBottom: '0.5rem', background: '#e8f5e9', color: '#2e7d32', borderRadius: 4, fontSize: 12 }}>{createUserSuccess}</div>
-                  )}
-                  <button type="submit" className="btn btn-primary" disabled={createUserSubmitting}>
-                    {createUserSubmitting ? 'Creating...' : 'Create User'}
-                  </button>
-                </form>
-              </div>
-            )}
-
-            {/* Users table */}
-            {usersLoading ? (
-              <div className="card" style={{ padding: '3rem', textAlign: 'center', color: 'var(--color-text-muted)' }}>Loading users...</div>
-            ) : users.length === 0 ? (
-              <div className="card" style={{ padding: '3rem', textAlign: 'center', color: 'var(--color-text-muted)' }}>
-                No users found.
-              </div>
-            ) : (
-              <div style={{ overflowX: 'auto' }}>
-                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-                  <thead>
-                    <tr style={{ background: '#1a1a2e', color: '#fff' }}>
-                      <th style={{ padding: 8, textAlign: 'left' }}>Username</th>
-                      <th style={{ padding: 8, textAlign: 'left' }}>Email</th>
-                      <th style={{ padding: 8, textAlign: 'left' }}>Full Name</th>
-                      <th style={{ padding: 8, textAlign: 'center' }}>Role</th>
-                      <th style={{ padding: 8, textAlign: 'center' }}>Status</th>
-                      <th style={{ padding: 8, textAlign: 'center' }}>Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {users.map((u, i) => {
-                      const isActive = u.is_active || u.status === 'active';
-                      return (
-                        <tr key={u.id} style={{ background: i % 2 === 0 ? '#fff' : '#f5f0eb' }}>
-                          <td style={{ padding: 8 }}>{u.username}</td>
-                          <td style={{ padding: 8 }}>{u.email}</td>
-                          <td style={{ padding: 8 }}>{u.full_name || '-'}</td>
-                          <td style={{ padding: 8, textAlign: 'center' }}>{u.role}</td>
-                          <td style={{ padding: 8, textAlign: 'center' }}>
-                            <span style={{
-                              padding: '2px 8px', borderRadius: 4, fontSize: 11,
-                              ...STATUS_BADGE(isActive ? 'active' : 'inactive')
-                            }}>
-                              {isActive ? 'Active' : 'Inactive'}
-                            </span>
-                          </td>
-                          <td style={{ padding: 8, textAlign: 'center' }}>
-                            <button
-                              className="btn btn-outline"
-                              style={{ padding: '4px 10px', fontSize: '0.8rem' }}
-                              onClick={() => handleToggleUserActive(u.id, isActive)}
-                            >
-                              {isActive ? 'Deactivate' : 'Activate'}
-                            </button>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            )}
+        ) : (
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem' }}>
+              <thead>
+                <tr style={{ background: '#f5f5f5', borderBottom: '2px solid #e0d8c8' }}>
+                  <th style={{ padding: '0.5rem 0.75rem', textAlign: 'left' }}>Book Title</th>
+                  <th style={{ padding: '0.5rem 0.75rem', textAlign: 'left' }}>Borrower</th>
+                  <th style={{ padding: '0.5rem 0.75rem', textAlign: 'left' }}>Borrow Date</th>
+                  <th style={{ padding: '0.5rem 0.75rem', textAlign: 'left' }}>Due Date</th>
+                  <th style={{ padding: '0.5rem 0.75rem', textAlign: 'left' }}>Return Date</th>
+                  <th style={{ padding: '0.5rem 0.75rem', textAlign: 'left' }}>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {borrowRecords.map((rec, idx) => (
+                  <tr key={rec.id || idx} style={{
+                    borderBottom: '1px solid #eee',
+                    background: idx % 2 === 0 ? '#fff' : '#fafafa',
+                  }}>
+                    <td style={{ padding: '0.5rem 0.75rem', fontWeight: 500 }}>{rec.title || rec.book_title}</td>
+                    <td style={{ padding: '0.5rem 0.75rem' }}>{rec.username || rec.borrower_name}</td>
+                    <td style={{ padding: '0.5rem 0.75rem', fontSize: '0.8rem' }}>
+                      {rec.borrow_date ? new Date(rec.borrow_date).toLocaleDateString() : ''}
+                    </td>
+                    <td style={{ padding: '0.5rem 0.75rem', fontSize: '0.8rem' }}>
+                      {rec.due_date ? new Date(rec.due_date).toLocaleDateString() : ''}
+                    </td>
+                    <td style={{ padding: '0.5rem 0.75rem', fontSize: '0.8rem' }}>
+                      {rec.return_date ? new Date(rec.return_date).toLocaleDateString() : '-'}
+                    </td>
+                    <td style={{ padding: '0.5rem 0.75rem' }}>
+                      <span style={{
+                        padding: '2px 8px', borderRadius: '3px', fontSize: '0.75rem', fontWeight: 'bold',
+                        background: rec.status === 'active' ? '#e8f5e9' : rec.status === 'overdue' ? '#ffebee' : '#e3f2fd',
+                        color: rec.status === 'active' ? '#2e7d32' : rec.status === 'overdue' ? '#c62828' : '#1565c0',
+                      }}>
+                        {rec.status || 'active'}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
-        );
-
-      case 'borrow-records':
-        return (
-          <div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-              <h2 style={{ margin: 0 }}>Borrow Records</h2>
-              <button
-                className="btn btn-primary"
-                style={{ padding: '6px 16px' }}
-                onClick={handleExportCSV}
-              >
-                Export CSV
-              </button>
-            </div>
-            <div style={{ display: 'flex', gap: '0.75rem', marginBottom: '1rem', flexWrap: 'wrap' }}>
-              <input
-                type="search"
-                placeholder="Search records..."
-                value={borrowFilters.search}
-                onChange={e => setBorrowFilters(prev => ({ ...prev, search: e.target.value }))}
-                style={{ flex: 1, minWidth: '200px' }}
-              />
-              <select
-                value={borrowFilters.status}
-                onChange={e => setBorrowFilters(prev => ({ ...prev, status: e.target.value }))}
-                style={{ width: '150px' }}
-              >
-                <option value="">All Status</option>
-                <option value="active">Active</option>
-                <option value="returned">Returned</option>
-                <option value="overdue">Overdue</option>
-              </select>
-              <input
-                type="date"
-                value={borrowFilters.dateFrom}
-                onChange={e => setBorrowFilters(prev => ({ ...prev, dateFrom: e.target.value }))}
-                style={{ width: '150px' }}
-                title="From date"
-              />
-              <input
-                type="date"
-                value={borrowFilters.dateTo}
-                onChange={e => setBorrowFilters(prev => ({ ...prev, dateTo: e.target.value }))}
-                style={{ width: '150px' }}
-                title="To date"
-              />
-            </div>
-
-            {borrowRecordsError && (
-              <div style={{ padding: '8px 12px', marginBottom: '1rem', background: '#fdecea', color: '#c62828', borderRadius: 4, fontSize: 13, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <span>{borrowRecordsError}</span>
-                <button onClick={() => setBorrowRecordsError(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#c62828' }}>x</button>
-              </div>
-            )}
-
-            {borrowRecordsLoading ? (
-              <div className="card" style={{ padding: '3rem', textAlign: 'center', color: 'var(--color-text-muted)' }}>Loading borrow records...</div>
-            ) : borrowRecords.length === 0 ? (
-              <div className="card" style={{ padding: '3rem', textAlign: 'center', color: 'var(--color-text-muted)' }}>
-                No borrow records found.
-              </div>
-            ) : (
-              <div style={{ overflowX: 'auto' }}>
-                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-                  <thead>
-                    <tr style={{ background: '#1a1a2e', color: '#fff' }}>
-                      <th style={{ padding: 8, textAlign: 'left' }}>User</th>
-                      <th style={{ padding: 8, textAlign: 'left' }}>Book</th>
-                      <th style={{ padding: 8, textAlign: 'center' }}>Borrow Date</th>
-                      <th style={{ padding: 8, textAlign: 'center' }}>Due Date</th>
-                      <th style={{ padding: 8, textAlign: 'center' }}>Return Date</th>
-                      <th style={{ padding: 8, textAlign: 'center' }}>Status</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {borrowRecords.map((rec, i) => (
-                      <tr key={rec.id} style={{ background: i % 2 === 0 ? '#fff' : '#f5f0eb' }}>
-                        <td style={{ padding: 8 }}>{rec.username || rec.user_name || 'Unknown'}</td>
-                        <td style={{ padding: 8 }}>{rec.book_title || rec.title || 'Unknown'}</td>
-                        <td style={{ padding: 8, textAlign: 'center', fontSize: 12 }}>
-                          {rec.borrow_date ? new Date(rec.borrow_date).toLocaleDateString() : '-'}
-                        </td>
-                        <td style={{ padding: 8, textAlign: 'center', fontSize: 12 }}>
-                          {rec.due_date ? new Date(rec.due_date).toLocaleDateString() : '-'}
-                        </td>
-                        <td style={{ padding: 8, textAlign: 'center', fontSize: 12 }}>
-                          {rec.return_date ? new Date(rec.return_date).toLocaleDateString() : '-'}
-                        </td>
-                        <td style={{ padding: 8, textAlign: 'center' }}>
-                          <span style={{
-                            padding: '2px 8px', borderRadius: 4, fontSize: 11,
-                            ...STATUS_BADGE(rec.status)
-                          }}>
-                            {rec.status}
-                          </span>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
-        );
-
-      case 'notifications':
-        return (
-          <div>
-            <h2 style={{ marginBottom: '1rem' }}>Notifications</h2>
-            <NotificationBoard />
-          </div>
-        );
-
-      case 'profile':
-        return (
-          <div>
-            <h2 style={{ marginBottom: '1rem' }}>Profile</h2>
-            <ProfileEditor />
-          </div>
-        );
-
-      default:
-        return <div className="card" style={{ padding: '2rem' }}>Select a tab.</div>;
-    }
-  }, [activeTab, filters, userFilters, borrowFilters,
-      pendingBooks, pendingLoading, pendingError, selectedPending, previewBook,
-      flaggedReviews, flaggedLoading, flaggedError,
-      users, usersLoading, usersError,
-      createUserForm, createUserSubmitting, createUserError, createUserSuccess,
-      showCreateUser, bulkActionMsg,
-      borrowRecords, borrowRecordsLoading, borrowRecordsError]);
+        )}
+      </div>
+    );
+  }
 
   return (
-    <div style={{ display: 'flex', height: '100vh', overflow: 'hidden' }}>
-      <Sidebar
-        navItems={NAV_ITEMS}
-        activeTab={activeTab}
-        onTabChange={setActiveTab}
-        user={user}
-        unreadCount={0}
-      />
-      <main style={{
-        flex: 1,
-        overflow: 'auto',
-        padding: '2rem',
-        background: 'var(--color-navy)'
+    <div style={{ display: 'flex', minHeight: '100vh', background: '#faf8f5' }}>
+      {/* Sidebar */}
+      <div style={{
+        width: '240px', minWidth: '240px',
+        background: '#2c1810', color: '#fff',
+        display: 'flex', flexDirection: 'column',
+        padding: '1.5rem 0',
+        fontFamily: 'DM Sans, sans-serif',
       }}>
+        <div style={{
+          fontFamily: 'Cormorant Garamond, serif', fontSize: '1.5rem',
+          padding: '0 1.25rem 1.25rem', borderBottom: '1px solid rgba(255,255,255,0.1)',
+          marginBottom: '1rem', color: '#c9a84c',
+        }}>
+          BiblioVault
+        </div>
+        <div style={{
+          padding: '0.25rem 1.25rem', marginBottom: '1rem',
+          fontSize: '0.75rem', color: '#c9a84c',
+          textTransform: 'uppercase', letterSpacing: '0.05em',
+        }}>
+          Librarian
+        </div>
+        <nav style={{ flex: 1 }}>
+          {NAV_ITEMS.map((item) => (
+            <button
+              key={item.id}
+              onClick={() => setActiveTab(item.id)}
+              style={{
+                display: 'flex', alignItems: 'center', gap: '0.75rem',
+                width: '100%', padding: '0.6rem 1.25rem',
+                border: 'none',
+                background: activeTab === item.id ? 'rgba(201, 168, 76, 0.15)' : 'transparent',
+                color: activeTab === item.id ? '#c9a84c' : 'rgba(255,255,255,0.7)',
+                cursor: 'pointer', fontSize: '0.88rem',
+                fontFamily: 'DM Sans, sans-serif', textAlign: 'left',
+                borderLeft: activeTab === item.id ? '3px solid #c9a84c' : '3px solid transparent',
+              }}
+            >
+              <span>{item.icon}</span>
+              <span>{item.label}</span>
+            </button>
+          ))}
+        </nav>
+        <div style={{ padding: '1rem 1.25rem', borderTop: '1px solid rgba(255,255,255,0.1)', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+          <LogoutButton />
+          <CrashTestButton />
+          {SIMULATE_UNRECOVERABLE_CRASH && <CrashUnrecoverableButton />}
+        </div>
+      </div>
+
+      {/* Main content */}
+      <div style={{ flex: 1, overflowY: 'auto' }}>
         {renderTabContent()}
-      </main>
+      </div>
     </div>
   );
 }
+
+function LogoutButton() {
+  const { logout } = useAuth();
+  return (
+    <button
+      onClick={() => { logout(); window.location.href = '/login'; }}
+      style={{
+        width: '100%', padding: '0.5rem',
+        background: 'rgba(255,255,255,0.1)',
+        color: '#fff', border: '1px solid rgba(255,255,255,0.2)',
+        borderRadius: '4px', cursor: 'pointer', fontSize: '0.85rem',
+        fontFamily: 'DM Sans, sans-serif',
+      }}
+    >
+      Logout
+    </button>
+  );
+}
+
+const lazyComponentMap = {
+  ManagePublishedBooks,
+  ManageRequests,
+  DownloadedStats,
+  NotificationBoard,
+  ProfileEditor,
+};

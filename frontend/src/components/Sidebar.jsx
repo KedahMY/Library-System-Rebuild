@@ -1,178 +1,172 @@
-import React from 'react';
-import { useNavigate } from 'react-router-dom';
-import { useAuth } from '../context/AuthContext';
-import { CrashTestButton, CrashUnrecoverableButton } from './CrashRecovery';
+// BiblioVault Sidebar — vertical navigation sidebar for all three portals.
+// Props: { portalName, tabs, activeTab, onTabChange, unreadCount }
+// Includes brand, role pill, nav items with unread badge, Logout, Crash Test,
+// and optionally Crash (No Recovery) when SIMULATE_UNRECOVERABLE_CRASH is true.
+//
+// Import from CrashRecovery for crash-test buttons:
+//   CrashTestButton, CrashUnrecoverableButton, SIMULATE_UNRECOVERABLE_CRASH
 
-export default function Sidebar({ navItems, activeTab, onTabChange, user, unreadCount }) {
-  const { logout } = useAuth();
-  const navigate = useNavigate();
+import React from 'react';
+import { useAuth } from '../context/AuthContext.jsx';
+import {
+  CrashTestButton,
+  CrashUnrecoverableButton,
+  SIMULATE_UNRECOVERABLE_CRASH,
+} from './CrashRecovery.jsx';
+
+export default function Sidebar({
+  portalName = '',
+  tabs = [],
+  activeTab = '',
+  onTabChange = () => {},
+  unreadCount = 0,
+}) {
+  const { user, logout } = useAuth();
 
   const handleLogout = () => {
     logout();
-    navigate('/login', { replace: true });
+    window.location.href = '/login';
   };
 
   return (
-    <aside style={{
-      width: '240px',
-      minWidth: '240px',
-      height: '100vh',
-      background: 'var(--color-dark-surface)',
-      borderRight: '1px solid var(--color-border)',
-      display: 'flex',
-      flexDirection: 'column',
-      overflow: 'hidden'
-    }}>
-      {/* Header */}
-      <div style={{
-        padding: '1.25rem',
-        borderBottom: '1px solid var(--color-border)'
-      }}>
-        <h3 style={{ margin: 0, color: 'var(--color-gold)' }}>BiblioVault</h3>
-      </div>
-
-      {/* User Info */}
-      {user && (
-        <div style={{
-          padding: '1rem 1.25rem',
-          borderBottom: '1px solid var(--color-border)',
-          display: 'flex',
-          alignItems: 'center',
-          gap: '0.75rem'
-        }}>
-          <div style={{
-            width: '36px',
-            height: '36px',
-            borderRadius: '50%',
-            background: 'var(--color-gold)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            color: 'var(--color-navy)',
-            fontWeight: 'bold',
-            fontSize: '0.9rem',
-            flexShrink: 0
-          }}>
-            {user.full_name ? user.full_name.charAt(0).toUpperCase() : '?'}
-          </div>
-          <div style={{ overflow: 'hidden' }}>
-            <div style={{
-              fontSize: '0.85rem',
-              fontWeight: 500,
-              whiteSpace: 'nowrap',
-              overflow: 'hidden',
-              textOverflow: 'ellipsis'
-            }}>
-              {user.full_name || user.username}
-            </div>
-            <div style={{
-              fontSize: '0.75rem',
-              color: 'var(--color-gold)',
-              textTransform: 'capitalize'
-            }}>
-              {user.role}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Navigation */}
-      <nav style={{ flex: 1, overflow: 'auto', padding: '0.5rem 0' }}>
-        {navItems.map(item => {
-          const isActive = item.id === activeTab;
-          return (
-            <button
-              key={item.id}
-              onClick={() => onTabChange(item.id)}
-              title={item.label}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '0.75rem',
-                width: '100%',
-                padding: '0.625rem 1.25rem',
-                border: 'none',
-                background: isActive ? 'rgba(201, 168, 76, 0.12)' : 'transparent',
-                color: isActive ? 'var(--color-gold)' : 'var(--color-text-muted)',
-                cursor: 'pointer',
-                fontSize: '0.9rem',
-                textAlign: 'left',
-                transition: 'all 0.15s',
-                position: 'relative'
-              }}
-              onMouseEnter={e => {
-                if (!isActive) e.currentTarget.style.background = 'rgba(255,255,255,0.03)';
-              }}
-              onMouseLeave={e => {
-                if (!isActive) e.currentTarget.style.background = 'transparent';
-              }}
-            >
-              <span style={{ fontSize: '1.1rem' }}>{item.icon}</span>
-              <span>{item.label}</span>
-              {item.id === 'notifications' && unreadCount > 0 && (
-                <span style={{
-                  marginLeft: 'auto',
-                  background: 'var(--color-ruby)',
-                  color: '#fff',
-                  fontSize: '0.7rem',
-                  fontWeight: 700,
-                  padding: '0.15rem 0.45rem',
-                  borderRadius: '999px',
-                  minWidth: '18px',
-                  textAlign: 'center',
-                  lineHeight: '1.2'
-                }}>
-                  {unreadCount > 99 ? '99+' : unreadCount}
-                </span>
-              )}
-            </button>
-          );
-        })}
-      </nav>
-
-      {/* Bottom: Logout + Crash buttons */}
-      <div style={{
-        borderTop: '1px solid var(--color-border)',
-        padding: '0.75rem 1.25rem',
+    <div
+      style={{
+        width: '240px',
+        minWidth: '240px',
+        background: '#2c1810',
+        color: '#fff',
         display: 'flex',
         flexDirection: 'column',
-        gap: '0.5rem'
-      }}>
-        <button
-          onClick={handleLogout}
-          title="Logout"
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: '0.5rem',
-            padding: '0.5rem 0.75rem',
-            border: '1px solid var(--color-border)',
-            borderRadius: 'var(--radius-sm)',
-            background: 'transparent',
-            color: 'var(--color-text-muted)',
-            cursor: 'pointer',
-            fontSize: '0.85rem',
-            transition: 'all 0.15s'
-          }}
-          onMouseEnter={e => {
-            e.currentTarget.style.background = 'rgba(231, 76, 60, 0.1)';
-            e.currentTarget.style.borderColor = 'var(--color-ruby)';
-            e.currentTarget.style.color = '#e57373';
-          }}
-          onMouseLeave={e => {
-            e.currentTarget.style.background = 'transparent';
-            e.currentTarget.style.borderColor = 'var(--color-border)';
-            e.currentTarget.style.color = 'var(--color-text-muted)';
-          }}
-        >
-          <span>🚪</span>
-          <span>Logout</span>
-        </button>
-        <div style={{ display: 'flex', gap: '0.35rem' }}>
-          <div style={{ flex: 1, fontSize: '0.75rem' }}><CrashTestButton /></div>
-          <div style={{ flex: 1, fontSize: '0.75rem' }}><CrashUnrecoverableButton /></div>
-        </div>
+        padding: '1.5rem 0',
+        fontFamily: 'DM Sans, sans-serif',
+        height: '100vh',
+        boxSizing: 'border-box',
+      }}
+    >
+      {/* Brand */}
+      <div
+        style={{
+          fontFamily: 'Cormorant Garamond, serif',
+          fontSize: '1.5rem',
+          padding: '0 1.25rem 1.25rem',
+          borderBottom: '1px solid rgba(255,255,255,0.1)',
+          marginBottom: '0.75rem',
+          color: '#c9a84c',
+        }}
+      >
+        BiblioVault
       </div>
-    </aside>
+
+      {/* Role pill */}
+      <div
+        style={{
+          padding: '0.25rem 1.25rem',
+          marginBottom: '0.75rem',
+          fontSize: '0.75rem',
+          color: '#c9a84c',
+          textTransform: 'uppercase',
+          letterSpacing: '0.05em',
+        }}
+      >
+        {portalName || user?.role || 'User'}
+      </div>
+
+      {/* Navigation */}
+      <nav style={{ flex: 1, overflowY: 'auto' }}>
+        {tabs.map((item) => (
+          <button
+            key={item.id}
+            onClick={() => onTabChange(item.id)}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.75rem',
+              width: '100%',
+              padding: '0.65rem 1.25rem',
+              border: 'none',
+              background:
+                activeTab === item.id
+                  ? 'rgba(201, 168, 76, 0.15)'
+                  : 'transparent',
+              color:
+                activeTab === item.id
+                  ? '#c9a84c'
+                  : 'rgba(255,255,255,0.7)',
+              cursor: 'pointer',
+              fontSize: '0.9rem',
+              fontFamily: 'DM Sans, sans-serif',
+              textAlign: 'left',
+              transition: 'all 0.2s',
+              borderLeft:
+                activeTab === item.id
+                  ? '3px solid #c9a84c'
+                  : '3px solid transparent',
+              position: 'relative',
+            }}
+          >
+            <span>{item.icon}</span>
+            <span style={{ flex: 1 }}>{item.label}</span>
+            {/* Unread notification badge */}
+            {item.id === 'notifications' && unreadCount > 0 && (
+              <span
+                style={{
+                  background: '#c62828',
+                  color: '#fff',
+                  borderRadius: '50%',
+                  padding: '2px 6px',
+                  fontSize: '0.7rem',
+                  fontWeight: 'bold',
+                  lineHeight: '1.2',
+                  minWidth: '18px',
+                  textAlign: 'center',
+                }}
+              >
+                {unreadCount > 99 ? '99+' : unreadCount}
+              </span>
+            )}
+          </button>
+        ))}
+      </nav>
+
+      {/* Bottom section: Logout + Crash buttons */}
+      <div
+        style={{
+          padding: '1rem 1.25rem',
+          borderTop: '1px solid rgba(255,255,255,0.1)',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '4px',
+        }}
+      >
+        <LogoutButton onLogout={handleLogout} />
+
+        {/* Crash Test button — visible in all portals */}
+        <CrashTestButton />
+
+        {/* Crash (No Recovery) — visible only when SIMULATE_UNRECOVERABLE_CRASH is true */}
+        {SIMULATE_UNRECOVERABLE_CRASH && <CrashUnrecoverableButton />}
+      </div>
+    </div>
+  );
+}
+
+function LogoutButton({ onLogout }) {
+  return (
+    <button
+      onClick={onLogout}
+      style={{
+        width: '100%',
+        padding: '0.5rem',
+        background: 'rgba(255,255,255,0.1)',
+        color: '#fff',
+        border: '1px solid rgba(255,255,255,0.2)',
+        borderRadius: '4px',
+        cursor: 'pointer',
+        fontSize: '0.85rem',
+        fontFamily: 'DM Sans, sans-serif',
+      }}
+    >
+      Logout
+    </button>
   );
 }

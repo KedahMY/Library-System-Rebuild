@@ -1,0 +1,101 @@
+- generic [ref=e3]:
+  - generic [ref=e4]:
+    - generic [ref=e5]: BiblioVault
+    - generic [ref=e6]: Librarian
+    - navigation [ref=e7]:
+      - button "⏳ Pending Submissions" [ref=e8] [cursor=pointer]:
+        - generic [ref=e9]: ⏳
+        - generic [ref=e10]: Pending Submissions
+      - button "📋 All Submissions" [ref=e11] [cursor=pointer]:
+        - generic [ref=e12]: 📋
+        - generic [ref=e13]: All Submissions
+      - button "📚 Manage Books" [ref=e14] [cursor=pointer]:
+        - generic [ref=e15]: 📚
+        - generic [ref=e16]: Manage Books
+      - button "📨 Book Requests" [ref=e17] [cursor=pointer]:
+        - generic [ref=e18]: 📨
+        - generic [ref=e19]: Book Requests
+      - button "📊 Downloaded Stats" [ref=e20] [cursor=pointer]:
+        - generic [ref=e21]: 📊
+        - generic [ref=e22]: Downloaded Stats
+      - button "🚩 Flagged Reviews" [ref=e23] [cursor=pointer]:
+        - generic [ref=e24]: 🚩
+        - generic [ref=e25]: Flagged Reviews
+      - button "👥 Manage Users" [ref=e26] [cursor=pointer]:
+        - generic [ref=e27]: 👥
+        - generic [ref=e28]: Manage Users
+      - button "📒 Borrow Records" [active] [ref=e29] [cursor=pointer]:
+        - generic [ref=e30]: 📒
+        - generic [ref=e31]: Borrow Records
+      - button "🔔 Notifications" [ref=e32] [cursor=pointer]:
+        - generic [ref=e33]: 🔔
+        - generic [ref=e34]: Notifications
+      - button "👤 My Profile" [ref=e35] [cursor=pointer]:
+        - generic [ref=e36]: 👤
+        - generic [ref=e37]: My Profile
+    - button "Logout" [ref=e39] [cursor=pointer]
+  - generic [ref=e41]:
+    - generic [ref=e42]:
+      - heading "Borrow Records" [level=2] [ref=e145]
+      - button "Export CSV" [ref=e146] [cursor=pointer]
+    - generic [ref=e44]:
+      - textbox "Search by title or borrower..." [ref=e147]
+      - combobox [ref=e54]:
+        - option "All Status" [selected]
+        - option "Active"
+        - option "Returned"
+        - option "Overdue"
+      - textbox [ref=e148]
+      - textbox [ref=e149]
+    - table [ref=e150]:
+      - rowgroup [ref=e151]:
+        - row "Book Title Borrower Borrow Date Due Date Return Date Status" [ref=e152]:
+          - columnheader "Book Title" [ref=e153]
+          - columnheader "Borrower" [ref=e154]
+          - columnheader "Borrow Date" [ref=e155]
+          - columnheader "Due Date" [ref=e156]
+          - columnheader "Return Date" [ref=e157]
+          - columnheader "Status" [ref=e158]
+      - rowgroup [ref=e159]:
+        - row "SA5 Verification Book SA5 Student 5/16/2026 5/23/2026 - active" [ref=e160]:
+          - cell "SA5 Verification Book" [ref=e161]
+          - cell "SA5 Student" [ref=e162]
+          - cell "5/16/2026" [ref=e163]
+          - cell "5/23/2026" [ref=e164]
+          - cell "-" [ref=e165]
+          - cell "active" [ref=e166]
+        - row "Reject-Delete Test Book Student Demo 5/16/2026 5/17/2026 5/16/2026 returned" [ref=e167]:
+          - cell "Reject-Delete Test Book" [ref=e168]
+          - cell "Student Demo" [ref=e169]
+          - cell "5/16/2026" [ref=e170]
+          - cell "5/17/2026" [ref=e171]
+          - cell "5/16/2026" [ref=e172]
+          - cell "returned" [ref=e173]
+        - row "Reject-Delete Test Book Student Demo 5/16/2026 5/19/2026 5/16/2026 returned" [ref=e174]:
+          - cell "Reject-Delete Test Book" [ref=e175]
+          - cell "Student Demo" [ref=e176]
+          - cell "5/16/2026" [ref=e177]
+          - cell "5/19/2026" [ref=e178]
+          - cell "5/16/2026" [ref=e179]
+          - cell "returned" [ref=e180]
+        - row "V-CAT-6 Test Book Student Demo 5/16/2026 5/16/2026 5/16/2026 returned" [ref=e181]:
+          - cell "V-CAT-6 Test Book" [ref=e182]
+          - cell "Student Demo" [ref=e183]
+          - cell "5/16/2026" [ref=e184]
+          - cell "5/16/2026" [ref=e185]
+          - cell "5/16/2026" [ref=e186]
+          - cell "returned" [ref=e187]
+        - row "Reject-Delete Test Book Student Demo 5/16/2026 5/19/2026 5/16/2026 returned" [ref=e188]:
+          - cell "Reject-Delete Test Book" [ref=e189]
+          - cell "Student Demo" [ref=e190]
+          - cell "5/16/2026" [ref=e191]
+          - cell "5/19/2026" [ref=e192]
+          - cell "5/16/2026" [ref=e193]
+          - cell "returned" [ref=e194]
+        - row "V-CAT-6 Test Book Student Demo 5/16/2026 5/16/2026 5/16/2026 returned" [ref=e195]:
+          - cell "V-CAT-6 Test Book" [ref=e196]
+          - cell "Student Demo" [ref=e197]
+          - cell "5/16/2026" [ref=e198]
+          - cell "5/16/2026" [ref=e199]
+          - cell "5/16/2026" [ref=e200]
+          - cell "returned" [ref=e201]

@@ -1,0 +1,17 @@
+- generic [ref=e4]:
+  - generic [ref=e5]:
+    - heading "BiblioVault" [level=1] [ref=e6]
+    - paragraph [ref=e7]: Sign in to your account
+  - generic [ref=e8]:
+    - generic [ref=e9]:
+      - generic [ref=e10]: Username
+      - textbox "Enter your username" [ref=e11]
+    - generic [ref=e12]:
+      - generic [ref=e13]: Password
+      - textbox "Enter your password" [ref=e14]
+    - generic [ref=e18]: Please enter both username and password
+    - button "Sign In" [active] [ref=e15] [cursor=pointer]
+  - generic [ref=e16]:
+    - text: Don't have an account?
+    - link "Create one" [ref=e17] [cursor=pointer]:
+      - /url: /register

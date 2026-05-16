@@ -1,142 +1,101 @@
+// BiblioVault crash recovery route — server-side mirror of client-side session state.
+// Supports sendBeacon requests via authenticateWithFallback (accepts _token in body).
+// Mounted at /api/recovery.
+
 import { Router } from 'express';
-import jwt from 'jsonwebtoken';
-import { randomUUID } from 'crypto';
-import db from '../database.js';
+import { v4 as uuidv4 } from 'uuid';
+import { getDb } from '../database.js';
+import { authenticateWithFallback } from '../middleware/auth.js';
 
 const router = Router();
 
-const JWT_SECRET = process.env.JWT_SECRET || 'library-system-secret-key-2024';
+// All routes use authenticateWithFallback for sendBeacon support
+router.use(authenticateWithFallback);
 
-// =========================================================================
-// authenticateWithFallback — tries Authorization header first,
-// then falls back to req.body._token (for sendBeacon support).
-// Sets req.user on success, returns 401 on failure.
-// =========================================================================
-function authenticateWithFallback(req, res, next) {
-  let token;
-
-  // Try Authorization header
-  const authHeader = req.headers.authorization;
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    token = authHeader.split(' ')[1];
-  }
-
-  // Fall back to body _token
-  if (!token && req.body && req.body._token) {
-    token = req.body._token;
-  }
-
-  if (!token) {
-    return res.status(401).json({ error: 'Authentication required' });
-  }
-
-  try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    req.user = {
-      id: decoded.id,
-      username: decoded.username,
-      role: decoded.role,
-      full_name: decoded.full_name
-    };
-    next();
-  } catch (err) {
-    return res.status(401).json({ error: 'Invalid or expired token' });
-  }
-}
-
-// =========================================================================
-// POST /api/recovery/save — upsert crash_recovery record
-// Accepts _token in body for sendBeacon requests
-// =========================================================================
+/**
+ * POST /api/recovery/save
+ * Saves or updates the crash-recovery state for the current user.
+ * Body: { screen, portal, state_data, _token? }
+ * Upserts into crash_recovery table (UNIQUE on user_id).
+ * Returns 200 { message: 'State saved' }
+ */
 router.post('/save', (req, res) => {
-  authenticateWithFallback(req, res, () => {
-    try {
-      const { screen, portal, state_data } = req.body;
+  try {
+    const { screen, portal, state_data } = req.body;
 
-      if (!screen || !portal) {
-        return res.status(400).json({ error: 'screen and portal are required' });
-      }
-
-      // state_data can be an object or string; store as JSON string
-      const stateDataStr = state_data
-        ? (typeof state_data === 'string' ? state_data : JSON.stringify(state_data))
-        : null;
-
-      const existing = db.prepare(
-        'SELECT id FROM crash_recovery WHERE user_id = ?'
-      ).get(req.user.id);
-
-      if (existing) {
-        db.prepare(`
-          UPDATE crash_recovery
-          SET screen = ?, portal = ?, state_data = ?, updated_at = CURRENT_TIMESTAMP
-          WHERE user_id = ?
-        `).run(screen, portal, stateDataStr, req.user.id);
-      } else {
-        db.prepare(`
-          INSERT INTO crash_recovery (id, user_id, screen, portal, state_data)
-          VALUES (?, ?, ?, ?, ?)
-        `).run(randomUUID(), req.user.id, screen, portal, stateDataStr);
-      }
-
-      return res.json({ message: 'Recovery state saved' });
-    } catch (err) {
-      console.error('POST /api/recovery/save error:', err);
-      return res.status(500).json({ error: 'Internal server error' });
+    if (!screen || !portal) {
+      return res.status(400).json({ error: 'Screen and portal are required' });
     }
-  });
+
+    const db = getDb();
+    const userId = req.user.id;
+
+    // Check if a recovery record already exists for this user
+    const existing = db.prepare('SELECT id FROM crash_recovery WHERE user_id = ?').get(userId);
+
+    // Store state_data as a JSON string; if it is already a string, use it directly.
+    const stateDataStr = (typeof state_data === 'string') ? state_data : (state_data ? JSON.stringify(state_data) : null);
+
+    if (existing) {
+      db.prepare(
+        'UPDATE crash_recovery SET screen = ?, portal = ?, state_data = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?'
+      ).run(screen, portal, stateDataStr, userId);
+    } else {
+      db.prepare(
+        'INSERT INTO crash_recovery (id, user_id, screen, portal, state_data) VALUES (?, ?, ?, ?, ?)'
+      ).run(uuidv4(), userId, screen, portal, stateDataStr);
+    }
+
+    res.json({ message: 'State saved' });
+  } catch (err) {
+    console.error('Error saving recovery state:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
 });
 
-// =========================================================================
-// GET /api/recovery/state — get recovery state
-// =========================================================================
+/**
+ * GET /api/recovery/state
+ * Returns the current crash-recovery state for the authenticated user.
+ * Response: { has_recovery: bool, screen?, portal?, state_data?, updated_at? }
+ */
 router.get('/state', (req, res) => {
-  authenticateWithFallback(req, res, () => {
-    try {
-      const record = db.prepare(
-        'SELECT screen, portal, state_data, updated_at FROM crash_recovery WHERE user_id = ?'
-      ).get(req.user.id);
+  try {
+    const db = getDb();
+    const row = db.prepare(
+      'SELECT screen, portal, state_data, updated_at FROM crash_recovery WHERE user_id = ?'
+    ).get(req.user.id);
 
-      if (!record) {
-        return res.json({ has_recovery: false });
-      }
-
-      let stateData = null;
-      if (record.state_data) {
-        try {
-          stateData = JSON.parse(record.state_data);
-        } catch {
-          stateData = record.state_data;
-        }
-      }
-
-      return res.json({
-        has_recovery: true,
-        screen: record.screen,
-        portal: record.portal,
-        state_data: stateData,
-        updated_at: record.updated_at
-      });
-    } catch (err) {
-      console.error('GET /api/recovery/state error:', err);
-      return res.status(500).json({ error: 'Internal server error' });
+    if (!row) {
+      return res.json({ has_recovery: false });
     }
-  });
+
+    res.json({
+      has_recovery: true,
+      screen: row.screen,
+      portal: row.portal,
+      state_data: row.state_data,
+      updated_at: row.updated_at
+    });
+  } catch (err) {
+    console.error('Error getting recovery state:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
 });
 
-// =========================================================================
-// DELETE /api/recovery/clear — delete crash_recovery record
-// =========================================================================
+/**
+ * DELETE /api/recovery/clear
+ * Deletes the crash-recovery row for the authenticated user.
+ * Returns 200 { message: 'State cleared' }
+ */
 router.delete('/clear', (req, res) => {
-  authenticateWithFallback(req, res, () => {
-    try {
-      db.prepare('DELETE FROM crash_recovery WHERE user_id = ?').run(req.user.id);
-      return res.json({ message: 'Recovery state cleared' });
-    } catch (err) {
-      console.error('DELETE /api/recovery/clear error:', err);
-      return res.status(500).json({ error: 'Internal server error' });
-    }
-  });
+  try {
+    const db = getDb();
+    db.prepare('DELETE FROM crash_recovery WHERE user_id = ?').run(req.user.id);
+    res.json({ message: 'State cleared' });
+  } catch (err) {
+    console.error('Error clearing recovery state:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
 });
 
 export default router;

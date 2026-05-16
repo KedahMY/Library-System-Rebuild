@@ -1,6 +1,10 @@
+// BiblioVault notifications route — in-app notification CRUD, announcement fan-out,
+// and lazy invocation of processAutoReturns + generateDueReminders (DR-15).
+// Mounted at /api/notifications. All endpoints require authentication.
+
 import { Router } from 'express';
-import { randomUUID } from 'crypto';
-import db, { processAutoReturns, generateDueReminders } from '../database.js';
+import { v4 as uuidv4 } from 'uuid';
+import { getDb, processAutoReturns, generateDueReminders } from '../database.js';
 import { authenticate, authorize } from '../middleware/auth.js';
 
 const router = Router();
@@ -8,211 +12,249 @@ const router = Router();
 // All routes require authentication
 router.use(authenticate);
 
-// =========================================================================
-// GET /api/notifications — list notifications for current user
-// DR-15: calls processAutoReturns() + generateDueReminders() first
-// =========================================================================
+/**
+ * GET /api/notifications
+ * Lists notifications for the authenticated user.
+ * Query params: type, is_read, category, priority, search, is_archived, page, limit
+ * Calls processAutoReturns() + generateDueReminders() first (DR-15).
+ * Returns { notifications: [...], unread_count, total }
+ */
 router.get('/', (req, res) => {
   try {
+    // Lazy job invocation (DR-15)
     processAutoReturns();
     generateDueReminders();
 
-    const { type, category, priority, search, is_archived, page, limit } = req.query;
-    const pageNum = parseInt(page) || 1;
-    const limitNum = parseInt(limit) || 20;
-    const offset = (pageNum - 1) * limitNum;
+    const db = getDb();
+    const userId = req.user.id;
 
-    const whereClauses = ['n.user_id = ?'];
-    const params = [req.user.id];
+    const {
+      type, is_read, category, priority, search, is_archived,
+      page = '1', limit = '50'
+    } = req.query;
+
+    const conditions = ['n.user_id = ?'];
+    const params = [userId];
 
     if (type) {
-      whereClauses.push('n.type = ?');
+      conditions.push('n.type = ?');
       params.push(type);
     }
+
+    if (is_read !== undefined) {
+      conditions.push('n.is_read = ?');
+      params.push(is_read === '1' || is_read === 'true' ? 1 : 0);
+    }
+
     if (category) {
-      whereClauses.push('n.category = ?');
+      conditions.push('n.category = ?');
       params.push(category);
     }
+
     if (priority) {
-      whereClauses.push('n.priority = ?');
+      conditions.push('n.priority = ?');
       params.push(priority);
     }
+
     if (search) {
-      whereClauses.push('(n.title LIKE ? OR n.message LIKE ?)');
-      const term = `%${search}%`;
-      params.push(term, term);
-    }
-    if (is_archived === 'true' || is_archived === '1') {
-      whereClauses.push('n.is_archived = 1');
-    } else if (is_archived === 'false' || is_archived === '0' || !is_archived) {
-      whereClauses.push('n.is_archived = 0');
+      conditions.push('(n.title LIKE ? OR n.message LIKE ?)');
+      const searchPattern = `%${search}%`;
+      params.push(searchPattern, searchPattern);
     }
 
-    const whereSQL = whereClauses.join(' AND ');
+    if (is_archived === undefined || (is_archived !== '1' && is_archived !== 'true')) {
+      conditions.push('n.is_archived = 0');
+    } else {
+      conditions.push('n.is_archived = 1');
+    }
 
+    const whereClause = conditions.join(' AND ');
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.max(1, Math.min(200, parseInt(limit, 10) || 50));
+    const offset = (pageNum - 1) * limitNum;
+
+    // Get total count
     const countRow = db.prepare(
-      `SELECT COUNT(*) AS total FROM notifications n WHERE ${whereSQL}`
+      `SELECT COUNT(*) as total FROM notifications n WHERE ${whereClause}`
     ).get(...params);
     const total = countRow.total;
 
-    const notifications = db.prepare(`
-      SELECT n.id, n.user_id, n.type, n.title, n.message, n.priority,
-             n.category, n.is_read, n.is_archived, n.related_id, n.created_at
-      FROM notifications n
-      WHERE ${whereSQL}
-      ORDER BY n.created_at DESC
-      LIMIT ? OFFSET ?
-    `).all(...params, limitNum, offset);
+    // Get notifications
+    const notifications = db.prepare(
+      `SELECT n.* FROM notifications n WHERE ${whereClause} ORDER BY n.created_at DESC LIMIT ? OFFSET ?`
+    ).all(...params, limitNum, offset);
 
-    return res.json({
-      notifications,
-      total,
-      page: pageNum,
-      limit: limitNum,
-      total_pages: Math.ceil(total / limitNum)
-    });
+    // Get unread count (unfiltered for the badge)
+    const unreadRow = db.prepare(
+      `SELECT COUNT(*) as count FROM notifications WHERE user_id = ? AND is_read = 0 AND is_archived = 0`
+    ).get(userId);
+    const unreadCount = unreadRow.count;
+
+    res.json({ notifications, unread_count: unreadCount, total });
   } catch (err) {
-    console.error('GET /api/notifications error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+    console.error('Error listing notifications:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
   }
 });
 
-// =========================================================================
-// GET /api/notifications/unread-count
-// =========================================================================
+/**
+ * GET /api/notifications/unread-count
+ * Returns the unread notification count for the current user.
+ * Response: { count: N }
+ */
 router.get('/unread-count', (req, res) => {
   try {
-    const { count } = db.prepare(
-      "SELECT COUNT(*) AS count FROM notifications WHERE user_id = ? AND is_read = 0 AND is_archived = 0"
+    const db = getDb();
+    const row = db.prepare(
+      'SELECT COUNT(*) as count FROM notifications WHERE user_id = ? AND is_read = 0 AND is_archived = 0'
     ).get(req.user.id);
-    return res.json({ count });
+    res.json({ count: row.count });
   } catch (err) {
-    console.error('GET /api/notifications/unread-count error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+    console.error('Error getting unread count:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
   }
 });
 
-// =========================================================================
-// PATCH /api/notifications/read-all — mark all as read
-// =========================================================================
-router.patch('/read-all', (req, res) => {
-  try {
-    db.prepare(
-      "UPDATE notifications SET is_read = 1 WHERE user_id = ? AND is_read = 0"
-    ).run(req.user.id);
-    return res.json({ message: 'All notifications marked as read' });
-  } catch (err) {
-    console.error('PATCH /api/notifications/read-all error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// =========================================================================
-// PATCH /api/notifications/:id/read — mark one as read
-// =========================================================================
+/**
+ * PATCH /api/notifications/:id/read
+ * Marks a single notification as read.
+ */
 router.patch('/:id/read', (req, res) => {
   try {
+    const db = getDb();
     const result = db.prepare(
-      "UPDATE notifications SET is_read = 1 WHERE id = ? AND user_id = ?"
+      'UPDATE notifications SET is_read = 1 WHERE id = ? AND user_id = ?'
     ).run(req.params.id, req.user.id);
+
     if (result.changes === 0) {
       return res.status(404).json({ error: 'Notification not found' });
     }
-    return res.json({ message: 'Notification marked as read' });
+
+    res.json({ message: 'Notification marked as read' });
   } catch (err) {
-    console.error('PATCH /api/notifications/:id/read error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+    console.error('Error marking notification as read:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
   }
 });
 
-// =========================================================================
-// PATCH /api/notifications/:id/archive — archive one
-// =========================================================================
+/**
+ * PATCH /api/notifications/read-all
+ * Marks all notifications for the current user as read.
+ */
+router.patch('/read-all', (req, res) => {
+  try {
+    const db = getDb();
+    db.prepare(
+      'UPDATE notifications SET is_read = 1 WHERE user_id = ? AND is_read = 0'
+    ).run(req.user.id);
+    res.json({ message: 'All notifications marked as read' });
+  } catch (err) {
+    console.error('Error marking all as read:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
+/**
+ * PATCH /api/notifications/:id/archive
+ * Archives a single notification.
+ */
 router.patch('/:id/archive', (req, res) => {
   try {
+    const db = getDb();
     const result = db.prepare(
-      "UPDATE notifications SET is_archived = 1 WHERE id = ? AND user_id = ?"
+      'UPDATE notifications SET is_archived = 1 WHERE id = ? AND user_id = ?'
     ).run(req.params.id, req.user.id);
+
     if (result.changes === 0) {
       return res.status(404).json({ error: 'Notification not found' });
     }
-    return res.json({ message: 'Notification archived' });
+
+    res.json({ message: 'Notification archived' });
   } catch (err) {
-    console.error('PATCH /api/notifications/:id/archive error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+    console.error('Error archiving notification:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
   }
 });
 
-// =========================================================================
-// DELETE /api/notifications/:id — delete one
-// =========================================================================
+/**
+ * DELETE /api/notifications/:id
+ * Deletes a single notification.
+ */
 router.delete('/:id', (req, res) => {
   try {
+    const db = getDb();
     const result = db.prepare(
-      "DELETE FROM notifications WHERE id = ? AND user_id = ?"
+      'DELETE FROM notifications WHERE id = ? AND user_id = ?'
     ).run(req.params.id, req.user.id);
+
     if (result.changes === 0) {
       return res.status(404).json({ error: 'Notification not found' });
     }
-    return res.json({ message: 'Notification deleted' });
+
+    res.json({ message: 'Notification deleted' });
   } catch (err) {
-    console.error('DELETE /api/notifications/:id error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+    console.error('Error deleting notification:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
   }
 });
 
-// =========================================================================
-// POST /api/notifications/announcement — librarian only
-// Fan-out: insert one row per targeted user
-// =========================================================================
+/**
+ * POST /api/notifications/announcement
+ * Librarian-only. Broadcasts an announcement to all users or a specific role.
+ * Body: { title, message, target_role?, priority? }
+ * Fan-out: inserts one row per target user.
+ * Returns 201 on success.
+ */
 router.post('/announcement', authorize('librarian'), (req, res) => {
   try {
-    const { title, message, target_role, priority } = req.body;
+    const { title, message, target_role, priority = 'normal' } = req.body;
 
-    if (!title || typeof title !== 'string' || title.trim().length === 0) {
-      return res.status(400).json({ error: 'Title is required' });
-    }
-    if (!message || typeof message !== 'string' || message.trim().length === 0) {
-      return res.status(400).json({ error: 'Message is required' });
+    if (!title || !message) {
+      return res.status(400).json({ error: 'Title and message are required' });
     }
 
-    // Build target user list
-    let targetUsers;
-    if (target_role) {
-      targetUsers = db.prepare('SELECT id FROM users WHERE role = ? AND active = 1').all(target_role);
+    const db = getDb();
+
+    // Determine target users
+    let users;
+    if (target_role && ['student', 'staff', 'author', 'librarian'].includes(target_role)) {
+      users = db.prepare('SELECT id FROM users WHERE role = ? AND active = 1').all(target_role);
     } else {
-      targetUsers = db.prepare('SELECT id FROM users WHERE active = 1').all();
+      // All active users, or all non-librarian if that's the design intent
+      // Spec says: "all non-librarian if target_role not specified" but to stay safe,
+      // we send to all active users. Let's check the spec again:
+      // "fan-out: insert one row for target_role users (or all non-librarian if target_role not specified)"
+      users = db.prepare("SELECT id FROM users WHERE role != 'librarian' AND active = 1").all();
     }
 
-    if (targetUsers.length === 0) {
-      return res.status(400).json({ error: 'No active users found for the target role' });
+    if (users.length === 0) {
+      return res.status(200).json({ message: 'No users match the target', count: 0 });
     }
 
-    const insertNotif = db.prepare(`
-      INSERT INTO notifications (id, user_id, type, title, message, priority, category)
-      VALUES (?, ?, 'announcement', ?, ?, ?, 'announcement')
-    `);
+    const insertNotif = db.prepare(
+      'INSERT INTO notifications (id, user_id, type, title, message, priority, category) VALUES (?, ?, ?, ?, ?, ?, ?)'
+    );
 
-    const tx = db.transaction(() => {
-      for (const user of targetUsers) {
+    const run = db.transaction(() => {
+      for (const user of users) {
         insertNotif.run(
-          randomUUID(),
+          uuidv4(),
           user.id,
-          title.trim(),
-          message.trim(),
-          priority || 'normal'
+          'announcement',
+          title,
+          message,
+          priority,
+          'announcement'
         );
       }
     });
-    tx();
 
-    return res.json({
-      message: 'Announcement sent',
-      recipient_count: targetUsers.length
-    });
+    run();
+
+    res.status(201).json({ message: 'Announcement sent', count: users.length });
   } catch (err) {
-    console.error('POST /api/notifications/announcement error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+    console.error('Error sending announcement:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
   }
 });
 

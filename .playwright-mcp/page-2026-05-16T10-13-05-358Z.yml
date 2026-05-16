@@ -1,0 +1,42 @@
+- generic [ref=e3]:
+  - generic [ref=e4]:
+    - generic [ref=e5]: BiblioVault
+    - generic [ref=e6]: student
+    - navigation [ref=e7]:
+      - button "🔍 Browse Books" [ref=e8] [cursor=pointer]:
+        - generic [ref=e9]: 🔍
+        - generic [ref=e10]: Browse Books
+      - button "⭐ Recommended" [active] [ref=e11] [cursor=pointer]:
+        - generic [ref=e12]: ⭐
+        - generic [ref=e13]: Recommended
+      - button "📖 My Borrows" [ref=e14] [cursor=pointer]:
+        - generic [ref=e15]: 📖
+        - generic [ref=e16]: My Borrows
+      - button "📜 Reading History" [ref=e17] [cursor=pointer]:
+        - generic [ref=e18]: 📜
+        - generic [ref=e19]: Reading History
+      - button "📨 Book Requests" [ref=e20] [cursor=pointer]:
+        - generic [ref=e21]: 📨
+        - generic [ref=e22]: Book Requests
+      - button "🔔 Notifications" [ref=e23] [cursor=pointer]:
+        - generic [ref=e24]: 🔔
+        - generic [ref=e25]: Notifications
+      - button "👤 My Profile" [ref=e26] [cursor=pointer]:
+        - generic [ref=e27]: 👤
+        - generic [ref=e28]: My Profile
+    - button "Logout" [ref=e30] [cursor=pointer]
+  - generic [ref=e32]:
+    - heading "Recommended for You" [level=2] [ref=e67]
+    - generic [ref=e34]:
+      - generic [ref=e68]:
+        - heading "Reject-Delete Test Book" [level=3] [ref=e69]
+        - paragraph [ref=e70]: by SA4 Author
+        - text: Fiction
+      - generic [ref=e71]:
+        - heading "V-CAT-6 Test Book" [level=3] [ref=e72]
+        - paragraph [ref=e73]: by SA4 Author
+        - text: Non-Fiction
+      - generic [ref=e74]:
+        - heading "SA5 Verification Book" [level=3] [ref=e75]
+        - paragraph [ref=e76]: by SA5 Author
+        - text: Fiction

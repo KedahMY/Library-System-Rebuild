@@ -1,6 +1,14 @@
-import React, { useRef, useEffect, useCallback } from 'react';
+// BiblioVault Crash Recovery — localStorage session persistence, crash-test buttons,
+// and session-recording hook. DR-10 key strings are exact and must not be modified.
+//
+// Exports:
+//   RECORD_KEY, REFRESH_FLAG, SHOULD_CLEAR_KEY, CRASH_TEST_CLOSE_KEY, CRASH_NO_RECOVERY_KEY,
+//   SIMULATE_UNRECOVERABLE_CRASH,
+//   useSessionRecorder, CrashTestButton, CrashUnrecoverableButton
 
-// DR-10: exact localStorage/sessionStorage key strings
+import { useState, useEffect, useRef, useCallback } from 'react';
+
+// ── DR-10: Crash-recovery localStorage keys (exact — do not change) ──────────
 export const RECORD_KEY = (userId) => `bv_session_${userId}`;
 export const REFRESH_FLAG = 'bv_is_refresh';          // sessionStorage
 export const SHOULD_CLEAR_KEY = 'bv_should_clear';    // localStorage
@@ -8,164 +16,195 @@ export const CRASH_TEST_CLOSE_KEY = 'bv_crash_test';  // localStorage
 export const CRASH_NO_RECOVERY_KEY = 'bv_crash_no_recovery'; // localStorage
 export const SIMULATE_UNRECOVERABLE_CRASH = true;
 
-/**
- * useSessionRecorder(portal, activeTab, stateSnapshot)
- *
- * Saves UI snapshot to localStorage every state change and every 5 seconds.
- * On beforeunload:
- *   - If bv_crash_no_recovery present → wipe record, clear key, return
- *   - Else save record
- *   - If bv_crash_test NOT present → set bv_should_clear and sessionStorage.bv_is_refresh='true'
- *
- * The userId is the first argument (the subject-owning user id).
- */
-export function useSessionRecorder(userId, portal, activeTab, stateSnapshot) {
-  const intervalRef = useRef(null);
-  const latestRef = useRef({});
+// ── useSessionRecorder ────────────────────────────────────────────────────────
+// Records the user's session state (portal, activeTab, stateSnapshot) to
+// localStorage on every meaningful change, every 5 seconds via interval,
+// and on window.beforeunload.
+//
+// Parameters:
+//   portal         — string identifying the current portal ('student', 'author', 'librarian')
+//   activeTab      — string id of the currently active tab
+//   stateSnapshot  — object with portal-specific UI state (filters, selections, etc.)
+//   userId         — the logged-in user's id
+export function useSessionRecorder(portal, activeTab, stateSnapshot, userId) {
+  const latestRef = useRef({ portal, activeTab, stateSnapshot, userId });
+  // Keep a ref to the latest values so the interval reads fresh data
+  latestRef.current = { portal, activeTab, stateSnapshot, userId };
 
-  // Keep ref up to date for the interval and beforeunload
-  latestRef.current = { userId, portal, activeTab, stateSnapshot };
-
+  // Save function
   const save = useCallback(() => {
-    const { userId: uid, portal: p, activeTab: tab, stateSnapshot: snap } = latestRef.current;
-    if (!uid) return;
-    const data = {
-      userId: uid,
+    const { portal: p, activeTab: t, stateSnapshot: s, userId: u } = latestRef.current;
+    if (!u || !p) return;
+
+    const record = {
+      userId: u,
       portal: p,
-      activeTab: tab,
-      stateSnapshot: snap,
-      updatedAt: Date.now()
+      activeTab: t,
+      stateSnapshot: s,
+      updatedAt: new Date().toISOString()
     };
     try {
-      localStorage.setItem(RECORD_KEY(uid), JSON.stringify(data));
+      localStorage.setItem(RECORD_KEY(u), JSON.stringify(record));
     } catch (e) {
-      console.error('useSessionRecorder save error:', e);
+      console.warn('Failed to save session record:', e.message);
     }
   }, []);
 
-  // Save on state change
+  // Save on every change (via useEffect when deps change)
   useEffect(() => {
-    save();
-  }, [save, userId, portal, activeTab, stateSnapshot]);
+    if (!userId) return;
+
+    const record = {
+      userId,
+      portal,
+      activeTab,
+      stateSnapshot,
+      updatedAt: new Date().toISOString()
+    };
+    try {
+      localStorage.setItem(RECORD_KEY(userId), JSON.stringify(record));
+    } catch (e) {
+      console.warn('Failed to save session record:', e.message);
+    }
+  }, [portal, activeTab, stateSnapshot, userId]);
 
   // Periodic save every 5 seconds
   useEffect(() => {
-    intervalRef.current = setInterval(save, 5000);
-    return () => {
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-        intervalRef.current = null;
-      }
-    };
-  }, [save]);
+    if (!userId) return;
+
+    const intervalId = setInterval(save, 5000);
+    return () => clearInterval(intervalId);
+  }, [userId, save]);
 
   // beforeunload handler
   useEffect(() => {
-    const handleBeforeUnload = () => {
-      const { userId: uid, portal: p, activeTab: tab, stateSnapshot: snap } = latestRef.current;
+    if (!userId) return;
 
-      // If unrecoverable crash flag set → wipe and abort
+    const handleBeforeUnload = () => {
+      const { portal: p, activeTab: t, stateSnapshot: s, userId: u } = latestRef.current;
+
+      // Check for "no recovery" flag
       if (localStorage.getItem(CRASH_NO_RECOVERY_KEY)) {
-        if (uid) {
-          localStorage.removeItem(RECORD_KEY(uid));
-        }
+        localStorage.removeItem(RECORD_KEY(u));
         localStorage.removeItem(CRASH_NO_RECOVERY_KEY);
         return;
       }
 
-      // Save record
-      if (uid) {
-        const data = {
-          userId: uid,
-          portal: p,
-          activeTab: tab,
-          stateSnapshot: snap,
-          updatedAt: Date.now()
-        };
-        try {
-          localStorage.setItem(RECORD_KEY(uid), JSON.stringify(data));
-        } catch (e) {
-          console.error('beforeunload save error:', e);
-        }
+      // Save current state
+      const record = {
+        userId: u,
+        portal: p,
+        activeTab: t,
+        stateSnapshot: s,
+        updatedAt: new Date().toISOString()
+      };
+      try {
+        localStorage.setItem(RECORD_KEY(u), JSON.stringify(record));
+      } catch (e) {
+        console.warn('Failed to save session record on unload:', e.message);
       }
 
-      // If bv_crash_test is NOT present, set bv_should_clear and bv_is_refresh
+      // If CRASH_TEST_CLOSE_KEY is NOT present, set flags for normal close
       if (!localStorage.getItem(CRASH_TEST_CLOSE_KEY)) {
+        localStorage.setItem(SHOULD_CLEAR_KEY, 'true');
         try {
-          localStorage.setItem(SHOULD_CLEAR_KEY, 'true');
           sessionStorage.setItem(REFRESH_FLAG, 'true');
         } catch (e) {
-          console.error('beforeunload flag set error:', e);
+          // sessionStorage may not be available in some contexts
         }
       }
     };
 
     window.addEventListener('beforeunload', handleBeforeUnload);
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-  }, [save]);
+  }, [userId]);
 }
 
-// =========================================================================
-// CrashTestButton
-// Sets bv_crash_test, confirms, POSTs /api/shutdown, then window.close()
-// =========================================================================
+// ── CrashTestButton ──────────────────────────────────────────────────────────
+// Renders a "Crash Test" button. On click, shows confirmation dialog,
+// then POSTs to /api/shutdown and calls window.close().
 export function CrashTestButton() {
-  const handleCrash = () => {
-    if (window.confirm('Crash test: This will shut down the server. Continue?')) {
-      // Set crash test flag so CrashRecoveryWrapper shows appropriate toast
-      try {
-        localStorage.setItem(CRASH_TEST_CLOSE_KEY, 'true');
-      } catch (e) {
-        console.error('CrashTestButton set flag error:', e);
-      }
+  const handleClick = () => {
+    const confirmed = window.confirm('Crash Test: This will shut down the server. Continue?');
+    if (!confirmed) return;
 
-      fetch('http://localhost:8000/api/shutdown', { method: 'POST' })
-        .catch(() => {})
-        .finally(() => {
-          try { window.close(); } catch (e) { /* may fail in some browsers */ }
-        });
-    }
+    fetch('http://localhost:8000/api/shutdown', { method: 'POST' })
+      .then(() => {
+        window.close();
+      })
+      .catch(() => {
+        // If the server shuts down before responding, the fetch may error
+        window.close();
+      });
   };
 
   return (
-    <button onClick={handleCrash} className="crash-test-btn" title="Crash Test (simulate server crash)">
+    <button
+      onClick={handleClick}
+      style={{
+        background: '#8b0000',
+        color: '#fff',
+        border: 'none',
+        padding: '6px 12px',
+        borderRadius: '4px',
+        cursor: 'pointer',
+        fontSize: '0.85rem',
+        marginTop: '8px',
+        width: '100%'
+      }}
+      title="Simulate a server crash (test recovery flow)"
+    >
       Crash Test
     </button>
   );
 }
 
-// =========================================================================
-// CrashUnrecoverableButton
-// Sets bv_crash_no_recovery, removes record immediately, then crash-test
-// =========================================================================
+// ── CrashUnrecoverableButton ──────────────────────────────────────────────────
+// Renders "Crash (No Recovery)" button. Sets the no-recovery flag, wipes the
+// session record, then POSTs to /api/shutdown.
 export function CrashUnrecoverableButton() {
-  const handleCrash = () => {
-    if (window.confirm('Unrecoverable crash: Session will NOT be restored. Continue?')) {
-      try {
-        // Set the unrecoverable flag
-        localStorage.setItem(CRASH_NO_RECOVERY_KEY, 'true');
+  const handleClick = () => {
+    const confirmed = window.confirm('Crash (No Recovery): Session will NOT be restored. Continue?');
+    if (!confirmed) return;
 
-        // Wipe session records immediately
-        for (let i = localStorage.length - 1; i >= 0; i--) {
-          const key = localStorage.key(i);
-          if (key && key.startsWith('bv_session_')) {
-            localStorage.removeItem(key);
-          }
-        }
-      } catch (e) {
-        console.error('CrashUnrecoverableButton set flag error:', e);
+    // Set the no-recovery flag and wipe the record immediately
+    localStorage.setItem(CRASH_NO_RECOVERY_KEY, 'true');
+
+    // Remove session record for any user
+    const keysToRemove = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith('bv_session_')) {
+        keysToRemove.push(key);
       }
-
-      fetch('http://localhost:8000/api/shutdown', { method: 'POST' })
-        .catch(() => {})
-        .finally(() => {
-          try { window.close(); } catch (e) { /* may fail in some browsers */ }
-        });
     }
+    keysToRemove.forEach((k) => localStorage.removeItem(k));
+
+    fetch('http://localhost:8000/api/shutdown', { method: 'POST' })
+      .then(() => {
+        window.close();
+      })
+      .catch(() => {
+        window.close();
+      });
   };
 
   return (
-    <button onClick={handleCrash} className="crash-unrecoverable-btn" title="Crash without recovery">
+    <button
+      onClick={handleClick}
+      style={{
+        background: '#555',
+        color: '#fff',
+        border: 'none',
+        padding: '6px 12px',
+        borderRadius: '4px',
+        cursor: 'pointer',
+        fontSize: '0.85rem',
+        marginTop: '4px',
+        width: '100%'
+      }}
+      title="Crash without recovery — session will be lost"
+    >
       Crash (No Recovery)
     </button>
   );

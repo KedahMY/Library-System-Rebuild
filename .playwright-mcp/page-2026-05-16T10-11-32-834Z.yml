@@ -1,0 +1,67 @@
+- generic [ref=e18]:
+  - generic [ref=e19]:
+    - generic [ref=e20]: BiblioVault
+    - generic [ref=e21]: Author
+    - navigation [ref=e22]:
+      - button "✍️ Publish New Book" [ref=e23] [cursor=pointer]:
+        - generic [ref=e24]: ✍️
+        - generic [ref=e25]: Publish New Book
+      - button "📋 My Submissions" [ref=e26] [cursor=pointer]:
+        - generic [ref=e27]: 📋
+        - generic [ref=e28]: My Submissions
+      - button "📝 Drafts" [ref=e29] [cursor=pointer]:
+        - generic [ref=e30]: 📝
+        - generic [ref=e31]: Drafts
+      - button "📊 Stats" [ref=e32] [cursor=pointer]:
+        - generic [ref=e33]: 📊
+        - generic [ref=e34]: Stats
+      - button "💬 Reviews" [ref=e35] [cursor=pointer]:
+        - generic [ref=e36]: 💬
+        - generic [ref=e37]: Reviews
+      - button "🔔 Notifications" [ref=e38] [cursor=pointer]:
+        - generic [ref=e39]: 🔔
+        - generic [ref=e40]: Notifications
+      - button "👤 My Profile" [ref=e41] [cursor=pointer]:
+        - generic [ref=e42]: 👤
+        - generic [ref=e43]: My Profile
+    - button "Logout" [ref=e45] [cursor=pointer]
+  - generic [ref=e47]:
+    - heading "Publish New Book" [level=2] [ref=e48]
+    - generic [ref=e49]:
+      - generic [ref=e50]:
+        - generic [ref=e51]: Title *
+        - textbox "Book title" [ref=e52]
+      - generic [ref=e53]:
+        - generic [ref=e54]: Author Name
+        - textbox [disabled] [ref=e55]: Author Demo
+      - generic [ref=e56]:
+        - generic [ref=e57]: Genre(s) *
+        - generic [ref=e58]:
+          - button "Fiction" [ref=e59] [cursor=pointer]
+          - button "Non-Fiction" [ref=e60] [cursor=pointer]
+          - button "Science Fiction" [ref=e61] [cursor=pointer]
+          - button "Fantasy" [ref=e62] [cursor=pointer]
+          - button "Mystery" [ref=e63] [cursor=pointer]
+          - button "Romance" [ref=e64] [cursor=pointer]
+          - button "Thriller" [ref=e65] [cursor=pointer]
+          - button "Horror" [ref=e66] [cursor=pointer]
+          - button "Biography" [ref=e67] [cursor=pointer]
+          - button "History" [ref=e68] [cursor=pointer]
+          - button "Science" [ref=e69] [cursor=pointer]
+          - button "Technology" [ref=e70] [cursor=pointer]
+          - button "Philosophy" [ref=e71] [cursor=pointer]
+          - button "Poetry" [ref=e72] [cursor=pointer]
+          - button "Drama" [ref=e73] [cursor=pointer]
+          - button "Comics" [ref=e74] [cursor=pointer]
+      - generic [ref=e75]:
+        - generic [ref=e76]: Description * (minimum 20 characters)
+        - textbox "Write a description for your book..." [ref=e77]
+        - generic [ref=e78]: 0 / 20 characters minimum
+      - button "Generate Summary (AI)" [ref=e80] [cursor=pointer]
+      - generic [ref=e81]:
+        - generic [ref=e82]: Book File * (PDF, TXT, DOC, DOCX — max 50 MB)
+        - button "Choose File" [ref=e83]
+      - generic [ref=e84]:
+        - generic [ref=e85]: Cover Image (optional — JPG/PNG, max 2 MB)
+        - button "Choose File" [ref=e86]
+      - button "Submit Book" [ref=e87] [cursor=pointer]

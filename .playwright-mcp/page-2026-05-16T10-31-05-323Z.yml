@@ -1,0 +1,82 @@
+- generic [ref=e18]:
+  - generic [ref=e19]:
+    - generic [ref=e20]: BiblioVault
+    - generic [ref=e21]: student
+    - navigation [ref=e22]:
+      - button "🔍 Browse Books" [active] [ref=e23] [cursor=pointer]:
+        - generic [ref=e24]: 🔍
+        - generic [ref=e25]: Browse Books
+      - button "⭐ Recommended" [ref=e26] [cursor=pointer]:
+        - generic [ref=e27]: ⭐
+        - generic [ref=e28]: Recommended
+      - button "📖 My Borrows" [ref=e29] [cursor=pointer]:
+        - generic [ref=e30]: 📖
+        - generic [ref=e31]: My Borrows
+      - button "📜 Reading History" [ref=e32] [cursor=pointer]:
+        - generic [ref=e33]: 📜
+        - generic [ref=e34]: Reading History
+      - button "📨 Book Requests" [ref=e35] [cursor=pointer]:
+        - generic [ref=e36]: 📨
+        - generic [ref=e37]: Book Requests
+      - button "🔔 Notifications" [ref=e38] [cursor=pointer]:
+        - generic [ref=e39]: 🔔
+        - generic [ref=e40]: Notifications
+      - button "👤 My Profile" [ref=e41] [cursor=pointer]:
+        - generic [ref=e42]: 👤
+        - generic [ref=e43]: My Profile
+    - button "Logout" [ref=e45] [cursor=pointer]
+  - generic [ref=e47]:
+    - heading "Browse Books" [level=2] [ref=e48]
+    - generic [ref=e49]:
+      - textbox "Search by title or author..." [ref=e50]
+      - combobox [ref=e51]:
+        - option "All Genres" [selected]
+        - option "Fiction"
+        - option "Non-Fiction"
+        - option "Science Fiction"
+        - option "Fantasy"
+        - option "Mystery"
+        - option "Romance"
+        - option "Thriller"
+        - option "Horror"
+        - option "Biography"
+        - option "History"
+        - option "Science"
+        - option "Technology"
+        - option "Philosophy"
+        - option "Poetry"
+        - option "Drama"
+        - option "Comics"
+      - combobox [ref=e52]:
+        - option "All Availability" [selected]
+        - option "Available"
+        - option "Borrowed"
+    - generic [ref=e53]:
+      - generic [ref=e54] [cursor=pointer]:
+        - heading "Edited Librarian Book" [level=3] [ref=e55]
+        - paragraph [ref=e56]: by Library Admin Edited
+        - generic [ref=e57]:
+          - generic [ref=e58]: Non-Fiction
+          - generic [ref=e59]: Available
+        - generic [ref=e60]: "Published: 5/16/2026"
+      - generic [ref=e61] [cursor=pointer]:
+        - heading "SA5 Verification Book" [level=3] [ref=e62]
+        - paragraph [ref=e63]: by SA5 Author
+        - generic [ref=e64]:
+          - generic [ref=e65]: Fiction
+          - generic [ref=e66]: Borrowed
+        - generic [ref=e67]: "Published: 5/16/2026"
+      - generic [ref=e68] [cursor=pointer]:
+        - heading "Reject-Delete Test Book" [level=3] [ref=e69]
+        - paragraph [ref=e70]: by SA4 Author
+        - generic [ref=e71]:
+          - generic [ref=e72]: Fiction
+          - generic [ref=e73]: Available
+        - generic [ref=e74]: "Published: 5/16/2026"
+      - generic [ref=e75] [cursor=pointer]:
+        - heading "V-CAT-6 Test Book" [level=3] [ref=e76]
+        - paragraph [ref=e77]: by SA4 Author
+        - generic [ref=e78]:
+          - generic [ref=e79]: Non-Fiction
+          - generic [ref=e80]: Available
+        - generic [ref=e81]: "Published: 5/16/2026"

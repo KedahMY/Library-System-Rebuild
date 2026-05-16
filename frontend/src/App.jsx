@@ -1,176 +1,175 @@
-import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react';
+// BiblioVault App — routing shell with crash-recovery wrapper.
+// Defines routes, ProtectedRoute, PortalRedirect, and CrashRecoveryWrapper.
+
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
-import { AuthProvider, useAuth } from './context/AuthContext';
 import {
-  RECORD_KEY, REFRESH_FLAG, SHOULD_CLEAR_KEY,
-  CRASH_TEST_CLOSE_KEY, CRASH_NO_RECOVERY_KEY
-} from './components/CrashRecovery';
-import LoginPage from './pages/LoginPage';
-import RegisterPage from './pages/RegisterPage';
-import StudentPortal from './pages/StudentPortal';
-import AuthorPortal from './pages/AuthorPortal';
-import LibrarianPortal from './pages/LibrarianPortal';
+  RECORD_KEY,
+  REFRESH_FLAG,
+  SHOULD_CLEAR_KEY,
+  CRASH_TEST_CLOSE_KEY,
+  CRASH_NO_RECOVERY_KEY
+} from './components/CrashRecovery.jsx';
+import { AuthProvider, RecoveryContext, useAuth } from './context/AuthContext.jsx';
+import LoginPage from './pages/LoginPage.jsx';
+import RegisterPage from './pages/RegisterPage.jsx';
+import StudentPortal from './pages/StudentPortal.jsx';
+import AuthorPortal from './pages/AuthorPortal.jsx';
+import LibrarianPortal from './pages/LibrarianPortal.jsx';
 
-// =========================================================================
-// RecoveryContext — exposes recoveryState, clearRecoveryState, toast, dismissToast
-// =========================================================================
-export const RecoveryContext = createContext(null);
-
-export function useRecovery() {
-  const ctx = useContext(RecoveryContext);
-  if (!ctx) {
-    throw new Error('useRecovery must be used within RecoveryContext.Provider');
-  }
-  return ctx;
-}
-
-// =========================================================================
-// ProtectedRoute — redirects to login if not authenticated,
-// redirects to appropriate portal if role doesn't match
-// =========================================================================
-function ProtectedRoute({ roles, children }) {
+// ── ProtectedRoute ───────────────────────────────────────────────────────────
+// Shows a loading spinner while auth is initializing.
+// Redirects to /login if not authenticated.
+// If authenticated but role doesn't match, redirects to /portal.
+function ProtectedRoute({ children, roles }) {
   const { user, loading } = useAuth();
 
-  if (loading) return <div className="flex-center" style={{ height: '100vh', background: 'var(--color-navy)', color: 'var(--color-text-muted)', fontSize: '1.1rem' }}>Loading...</div>;
-  if (!user) return <Navigate to="/login" replace />;
-  if (roles && !roles.includes(user.role)) {
-    const roleMap = {
-      student: '/student',
-      staff: '/student',
-      author: '/author',
-      librarian: '/librarian'
-    };
-    return <Navigate to={roleMap[user.role] || '/login'} replace />;
+  if (loading) {
+    return (
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        minHeight: '100vh', background: '#1a1a2e',
+        color: '#c9a84c', fontFamily: 'DM Sans, sans-serif', fontSize: '1rem',
+      }}>
+        Loading...
+      </div>
+    );
   }
+
+  if (!user) {
+    return <Navigate to="/login" replace />;
+  }
+
+  if (roles && !roles.includes(user.role)) {
+    return <Navigate to="/portal" replace />;
+  }
+
   return children;
 }
 
-// =========================================================================
-// PortalRedirect — sends user to their role's portal
-// =========================================================================
+// ── PortalRedirect ───────────────────────────────────────────────────────────
+// Redirects to the correct portal based on user role.
 function PortalRedirect() {
-  const { user, loading } = useAuth();
-  if (loading) return <div className="flex-center" style={{ height: '100vh', background: 'var(--color-navy)', color: 'var(--color-text-muted)' }}>Loading...</div>;
-  if (!user) return <Navigate to="/login" replace />;
+  const { user } = useAuth();
+
+  if (!user) {
+    return <Navigate to="/login" replace />;
+  }
+
   const roleMap = {
     student: '/student',
     staff: '/student',
     author: '/author',
     librarian: '/librarian'
   };
-  return <Navigate to={roleMap[user.role] || '/login'} replace />;
+
+  const target = roleMap[user.role] || '/login';
+  return <Navigate to={target} replace />;
 }
 
-// =========================================================================
-// CrashRecoveryWrapper — reads flags on mount, decides restoration action
+// ── CrashRecoveryWrapper ──────────────────────────────────────────────────────
+// Implements the crash-recovery decision matrix:
+//   A (refresh)      — REFRESH_FLAG set → restore silently
+//   B (normal close) — SHOULD_CLEAR_KEY set → clear record, no toast
+//   C (crash test)   — CRASH_TEST_CLOSE_KEY set → restore with toast
+//   D (no recovery)  — CRASH_NO_RECOVERY_KEY set → clear all, fresh start
+//   E (fresh)        — no keys → normal startup
 //
-// Scenarios:
-//   A — Refresh (bv_is_refresh exists): auto-restore state silently
-//   B — Normal close (bv_should_clear exists): clear crash record, no toast
-//   C — Crash test (CRASH_TEST_CLOSE_KEY set, no REFRESH_FLAG): restore, toast
-//   D — Unrecoverable (CRASH_NO_RECOVERY_KEY set): clear all keys, error toast
-//   E — No record: normal startup
-// =========================================================================
+// Wraps children in RecoveryContext.Provider.
 function CrashRecoveryWrapper({ children }) {
-  const { user, loading } = useAuth();
+  const { user } = useAuth();
   const [recoveryState, setRecoveryState] = useState(null);
   const [toast, setToast] = useState(null);
-  const prevUserRef = useRef(null);
+  const initialCheckDone = useRef(false);
+  const prevUserIdRef = useRef(null);
 
-  // Read refresh flag synchronously at component creation (before any effect)
-  const isRefreshRef = useRef(
-    sessionStorage.getItem(REFRESH_FLAG) === 'true'
-  );
-
+  // The decision matrix runs once on mount (before auth resolves) and again
+  // when the user becomes available (login detected via prevUserIdRef).
   useEffect(() => {
-    if (loading) return;
+    // Read keys synchronously
+    const refreshFlag = sessionStorage.getItem(REFRESH_FLAG);
+    const crashTestFlag = localStorage.getItem(CRASH_TEST_CLOSE_KEY);
+    const shouldClear = localStorage.getItem(SHOULD_CLEAR_KEY);
+    const noRecovery = localStorage.getItem(CRASH_NO_RECOVERY_KEY);
 
-    // ---------- Logout transition (user → null) ----------
-    if (prevUserRef.current && !user) {
-      const prevId = prevUserRef.current.id;
-      localStorage.removeItem(RECORD_KEY(prevId));
-      localStorage.removeItem(SHOULD_CLEAR_KEY);
-      sessionStorage.removeItem(REFRESH_FLAG);
-      setRecoveryState(null);
-      setToast(null);
-      prevUserRef.current = user;
-      return;
-    }
-
-    // ---------- Only process when user is available ----------
+    // Only run the decision if we have a user AND haven't processed for this user yet
     if (!user) {
-      prevUserRef.current = user;
+      // On logout (user transition from something → null), clear user-specific keys
+      if (prevUserIdRef.current) {
+        localStorage.removeItem(RECORD_KEY(prevUserIdRef.current));
+        localStorage.removeItem(SHOULD_CLEAR_KEY);
+        prevUserIdRef.current = null;
+        setRecoveryState(null);
+      }
       return;
     }
 
-    const recordKey = RECORD_KEY(user.id);
-    const rawRecord = localStorage.getItem(recordKey);
-    const isRefresh = isRefreshRef.current;
-    const crashTestKey = localStorage.getItem(CRASH_TEST_CLOSE_KEY);
-    const noRecoveryKey = localStorage.getItem(CRASH_NO_RECOVERY_KEY);
+    // User is logged in
+    prevUserIdRef.current = user.id;
 
-    // Helper: parse record if valid for this user
-    const parseRecord = () => {
-      if (!rawRecord) return null;
-      try {
-        const record = JSON.parse(rawRecord);
-        if (String(record.userId) === String(user.id)) {
-          return record;
-        }
-      } catch { /* corrupt record */ }
-      return null;
-    };
-
-    // Scenario D — Unrecoverable
-    if (noRecoveryKey) {
+    // Scenario D: No recovery
+    if (noRecovery) {
       localStorage.removeItem(CRASH_NO_RECOVERY_KEY);
-      localStorage.removeItem(recordKey);
+      localStorage.removeItem(RECORD_KEY(user.id));
       localStorage.removeItem(SHOULD_CLEAR_KEY);
-      sessionStorage.removeItem(REFRESH_FLAG);
-      setRecoveryState(null);
-      setToast({ type: 'error', message: 'Session not recovered. Starting fresh.' });
+      return;
     }
 
-    // Scenario A — Refresh (same tab, silent restore)
-    else if (isRefresh) {
+    // Scenario B: Normal close
+    if (shouldClear && !crashTestFlag && !refreshFlag) {
+      localStorage.removeItem(RECORD_KEY(user.id));
       localStorage.removeItem(SHOULD_CLEAR_KEY);
-      const record = parseRecord();
-      if (record) {
-        setRecoveryState(record);
+      return;
+    }
+
+    // Scenario A: Refresh — clean should_clear, restore silently
+    if (refreshFlag) {
+      localStorage.removeItem(SHOULD_CLEAR_KEY);
+      try {
+        sessionStorage.removeItem(REFRESH_FLAG);
+      } catch (e) { /* ignore */ }
+      const recordStr = localStorage.getItem(RECORD_KEY(user.id));
+      if (recordStr) {
+        try {
+          const record = JSON.parse(recordStr);
+          if (String(record.userId) === String(user.id)) {
+            setRecoveryState({ portal: record.portal, activeTab: record.activeTab, stateSnapshot: record.stateSnapshot });
+            // Silent restore — no toast
+          }
+        } catch (e) { /* ignore parse error */ }
       }
-      sessionStorage.removeItem(REFRESH_FLAG);
+      return;
     }
 
-    // Scenario C — Crash test (bv_crash_test set, no refresh flag)
-    else if (crashTestKey) {
+    // Scenario C: Crash test
+    if (crashTestFlag) {
       localStorage.removeItem(CRASH_TEST_CLOSE_KEY);
       localStorage.removeItem(SHOULD_CLEAR_KEY);
-      const record = parseRecord();
-      if (record) {
-        setRecoveryState(record);
-        setToast({ type: 'success', message: 'Session recovered after crash test' });
+      const recordStr = localStorage.getItem(RECORD_KEY(user.id));
+      if (recordStr) {
+        try {
+          const record = JSON.parse(recordStr);
+          if (String(record.userId) === String(user.id)) {
+            setRecoveryState({ portal: record.portal, activeTab: record.activeTab, stateSnapshot: record.stateSnapshot });
+            setToast('Session recovered after crash test');
+          }
+        } catch (e) { /* ignore parse error */ }
       }
+      return;
     }
 
-    // Scenario B — Normal close (bv_should_clear set with no other flags)
-    else if (localStorage.getItem(SHOULD_CLEAR_KEY)) {
-      localStorage.removeItem(SHOULD_CLEAR_KEY);
-      localStorage.removeItem(recordKey);
-      sessionStorage.removeItem(REFRESH_FLAG);
-      setRecoveryState(null);
+    // Scenario E: Fresh — check if there's a stale record (real crash scenario)
+    const recordStr = localStorage.getItem(RECORD_KEY(user.id));
+    if (recordStr) {
+      try {
+        const record = JSON.parse(recordStr);
+        if (String(record.userId) === String(user.id)) {
+          setRecoveryState({ portal: record.portal, activeTab: record.activeTab, stateSnapshot: record.stateSnapshot });
+          // Real crash — error-styled toast (optional)
+        }
+      } catch (e) { /* ignore */ }
     }
-
-    // Scenario E — Record exists but none of the flags above → real crash
-    else if (rawRecord) {
-      const record = parseRecord();
-      if (record) {
-        setRecoveryState(record);
-        setToast({ type: 'error', message: 'Session recovered after unexpected crash' });
-      }
-    }
-
-    prevUserRef.current = user;
-  }, [user, loading]);
+  }, [user]);
 
   const clearRecoveryState = useCallback(() => {
     setRecoveryState(null);
@@ -181,26 +180,25 @@ function CrashRecoveryWrapper({ children }) {
   }, []);
 
   return (
-    <RecoveryContext.Provider value={{ recoveryState, clearRecoveryState, toast, dismissToast }}>
+    <RecoveryContext.Provider value={{ recoveryState, clearRecoveryState }}>
       {toast && (
         <div
-          onClick={dismissToast}
           style={{
             position: 'fixed',
-            top: '1rem',
-            right: '1rem',
-            zIndex: 9999,
-            padding: '1rem 1.5rem',
-            borderRadius: '4px',
-            backgroundColor: toast.type === 'error' ? '#d32f2f' : '#388e3c',
+            top: '16px',
+            right: '16px',
+            background: toast.includes('crash test') ? '#c9a84c' : '#8b0000',
             color: '#fff',
-            fontFamily: 'sans-serif',
-            fontSize: '0.95rem',
-            cursor: 'pointer',
-            boxShadow: '0 2px 8px rgba(0,0,0,0.2)'
+            padding: '12px 20px',
+            borderRadius: '6px',
+            zIndex: 9999,
+            fontFamily: 'DM Sans, sans-serif',
+            boxShadow: '0 2px 8px rgba(0,0,0,0.3)',
+            cursor: 'pointer'
           }}
+          onClick={dismissToast}
         >
-          {toast.message}
+          {toast}
         </div>
       )}
       {children}
@@ -208,11 +206,8 @@ function CrashRecoveryWrapper({ children }) {
   );
 }
 
-// =========================================================================
-// App — root component
-// Layout: AuthProvider → BrowserRouter → CrashRecoveryWrapper → Routes
-// =========================================================================
-export default function App() {
+// ── App ───────────────────────────────────────────────────────────────────────
+function App() {
   return (
     <AuthProvider>
       <BrowserRouter>
@@ -245,11 +240,13 @@ export default function App() {
                 </ProtectedRoute>
               }
             />
-            <Route path="/" element={<Navigate to="/login" replace />} />
-            <Route path="*" element={<Navigate to="/login" replace />} />
+            <Route path="/" element={<Navigate to="/portal" replace />} />
+            <Route path="*" element={<Navigate to="/portal" replace />} />
           </Routes>
         </CrashRecoveryWrapper>
       </BrowserRouter>
     </AuthProvider>
   );
 }
+
+export default App;

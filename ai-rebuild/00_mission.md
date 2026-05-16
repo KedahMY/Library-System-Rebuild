@@ -8,8 +8,7 @@
 |---|---|---|
 | 00 | `00_mission.md` *(this file)* | Goal, success criteria, deterministic rules |
 | 01 | `01_repo_analysis.md` | Reference repo inventory |
-| 02 | `02_requirements_normalized.md` | Requirements with stable IDs + MoSCoW |
-| 03 | `03_feature_gap_matrix.md` | Required vs current vs missing per ID |
+| 02 | `02_requirements_normalized.md` | Requirements with stable IDs + MoSCoW (superseded by 16 on conflict) |
 | 04 | `04_architecture_lock.md` | Pinned versions, ports, conventions |
 | 05 | `05_data_model.md` | DDL, migrations, FSMs, notification catalog |
 | 06 | `06_screen_flow.md` | Per-portal tabs, snapshots, flows, modals |
@@ -22,6 +21,9 @@
 | 13 | `13_risks_and_failure_modes.md` | FM-* failure modes + recovery procedures |
 | 14 | `14_human_inputs_required.md` | The (small) list of decisions humans actually own |
 | 15 | `15_env_and_secrets_template.md` | `.env.example`, secret generation, redaction policy |
+| 16 | `16_full_requirements_verbatim.md` | **CANONICAL** rubric text — wins all conflicts |
+| 17 | `17_acceptance_checklist.md` | 182 binary REQ-* checks; walked by M10 audit |
+| — | `prompts/` | 9 pre-written subagent prompt files used by the lead orchestrator |
 
 ---
 
@@ -29,6 +31,7 @@
 
 Produce a runnable full-stack application that:
 
+0. **Passes every REQ-001..REQ-182 in [`17_acceptance_checklist.md`](17_acceptance_checklist.md)** against the running system. This is the binding success criterion (SC-11). The verbatim rubric is in [`16_full_requirements_verbatim.md`](16_full_requirements_verbatim.md).
 1. Implements **every requirement** in [`02_requirements_normalized.md`](02_requirements_normalized.md) flagged `MUST` (Phase 1, Phase 2, Phase 3 in-scope).
 2. **Matches the reference implementation's external behavior** (routes, response shapes, DB schema, screen flow) as locked in [`04_architecture_lock.md`](04_architecture_lock.md), [`05_data_model.md`](05_data_model.md), and [`06_screen_flow.md`](06_screen_flow.md).
 3. **Passes every gate** in [`07_test_strategy.md`](07_test_strategy.md) (smoke + Playwright + manual matrix).
@@ -54,6 +57,7 @@ The rebuild is considered complete **only when all of the following are true**:
 | SC-8 | No unauthorized cross-role access (a `student` JWT cannot hit `/api/librarian/*`) | Smoke matrix |
 | SC-9 | LLM and Open Library integrations **degrade gracefully** when keys/services are unavailable (no 5xx cascade) | Manual unplug test |
 | SC-10 | TA can follow `12_rebuild_readme.md` start-to-finish with zero out-of-band commands | Independent run |
+| SC-11 | **REQUIREMENT AUDIT** — every REQ-001 through REQ-182 in [`17_acceptance_checklist.md`](17_acceptance_checklist.md) returns PASS against the running system | `ai-rebuild/test-pack/results/requirement_audit.log` final line reads `ALL REQUIREMENTS PASS (182/182)` |
 
 ---
 
@@ -107,7 +111,7 @@ These rules exist because the reference implementation has invariants that quiet
 
 Follow this order. **Do not skip ahead.**
 
-1. **Read in order**: `00_mission` → `04_architecture_lock` → `05_data_model` → `02_requirements_normalized` → `03_feature_gap_matrix` → `06_screen_flow` → `07_test_strategy` → `11_execution_plan` → `10_subagents`.
+1. **Read in order**: `00_mission` → `04_architecture_lock` → `05_data_model` → `16_full_requirements_verbatim` → `17_acceptance_checklist` → `02_requirements_normalized` → `06_screen_flow` → `07_test_strategy` → `11_execution_plan` → `10_subagents`.
 2. **Verify environment**: Node ≥18, npm ≥8, sqlite3 CLI optional, Windows or POSIX OK.
 3. **Plan**: produce a TodoWrite list mirroring `11_execution_plan.md` milestones.
 4. **Spawn subagents** per `10_subagents.md` — respect ownership boundaries.

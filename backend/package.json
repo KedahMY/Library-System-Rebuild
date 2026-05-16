@@ -1,8 +1,13 @@
 {
   "name": "bibliovault-backend",
   "version": "1.0.0",
+  "description": "BiblioVault E-Book Library Management System — backend API",
+  "private": true,
   "type": "module",
-  "scripts": { "start": "node server.js", "dev": "node server.js" },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
   "dependencies": {
     "express": "^4.18.2",
     "better-sqlite3": "^11.0.0",

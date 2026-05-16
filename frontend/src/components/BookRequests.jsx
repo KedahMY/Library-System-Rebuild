@@ -1,93 +1,109 @@
+// BiblioVault BookRequests component — student/staff book request submission
+// form and request history list with duplicate detection.
+// No props — uses the authenticated user context.
+
 import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 
-const API = axios.create({ baseURL: '/api' });
+const API_BASE = '';
 
-const STATUS_STYLES = {
-  pending: { background: '#fff3e0', color: '#e65100' },
-  approved: { background: '#e8f5e9', color: '#2e7d32' },
-  rejected: { background: '#fdecea', color: '#c62828' },
-  fulfilled: { background: '#e3f2fd', color: '#1565c0' }
-};
+function getToken() {
+  return localStorage.getItem('token') || '';
+}
 
-const STATUS_LABELS = {
-  pending: 'Pending',
-  approved: 'Approved',
-  rejected: 'Rejected',
-  fulfilled: 'Fulfilled'
-};
+function getAuthHeaders() {
+  return { Authorization: `Bearer ${getToken()}` };
+}
 
 export default function BookRequests() {
-  const [requests, setRequests] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
+  // Form state
   const [title, setTitle] = useState('');
   const [author, setAuthor] = useState('');
   const [genre, setGenre] = useState('');
   const [reason, setReason] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState(null);
+  const [submitSuccess, setSubmitSuccess] = useState(false);
+
+  // Duplicate detection
   const [duplicate, setDuplicate] = useState(null);
+  const [checkingDuplicate, setCheckingDuplicate] = useState(false);
 
-  const token = localStorage.getItem('token');
+  // Request history
+  const [requests, setRequests] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
 
+  // Genre options
+  const GENRES = [
+    'Fiction', 'Non-Fiction', 'Science Fiction', 'Fantasy', 'Mystery',
+    'Romance', 'Thriller', 'Horror', 'Biography', 'History',
+    'Science', 'Technology', 'Philosophy', 'Poetry', 'Drama', 'Comics',
+  ];
+
+  // Fetch user's requests
   const fetchRequests = useCallback(async () => {
+    setLoading(true);
+    setError(null);
     try {
-      setLoading(true);
-      const res = await API.get('/requests', {
-        headers: { Authorization: `Bearer ${token}` }
+      const res = await axios.get(`${API_BASE}/api/requests/mine`, {
+        headers: getAuthHeaders(),
       });
-      setRequests(res.data.requests || []);
+      setRequests(res.data || []);
     } catch (err) {
       setError(err.response?.data?.error || 'Failed to load requests');
     } finally {
       setLoading(false);
     }
-  }, [token]);
+  }, []);
 
   useEffect(() => {
     fetchRequests();
   }, [fetchRequests]);
 
-  // Debounced duplicate check
+  // Duplicate check with debounce
   useEffect(() => {
-    if (!title || !author) {
+    if (!title.trim()) {
       setDuplicate(null);
       return;
     }
 
     const timer = setTimeout(async () => {
+      setCheckingDuplicate(true);
       try {
-        const res = await API.get('/requests/check-duplicate', {
-          params: { title, author },
-          headers: { Authorization: `Bearer ${token}` }
-        });
+        const res = await axios.get(
+          `${API_BASE}/api/requests/check-duplicate?title=${encodeURIComponent(title.trim())}&author=${encodeURIComponent(author.trim())}`,
+          { headers: getAuthHeaders() }
+        );
         setDuplicate(res.data);
       } catch (err) {
         setDuplicate(null);
+      } finally {
+        setCheckingDuplicate(false);
       }
-    }, 500);
+    }, 600);
 
     return () => clearTimeout(timer);
-  }, [title, author, token]);
+  }, [title, author]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-
     if (!title.trim() || !author.trim() || !genre.trim()) {
-      setError('Title, author, and genre are required');
+      setSubmitError('Title, author, and genre are required');
       return;
     }
 
+    setSubmitting(true);
+    setSubmitError(null);
+    setSubmitSuccess(false);
+
     try {
-      setSubmitting(true);
-      await API.post('/requests', {
-        title: title.trim(),
-        author: author.trim(),
-        genre: genre.trim(),
-        reason: reason.trim() || null
-      }, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
+      await axios.post(
+        `${API_BASE}/api/requests`,
+        { title: title.trim(), author: author.trim(), genre: genre.trim(), reason: reason.trim() || undefined },
+        { headers: getAuthHeaders() }
+      );
+      setSubmitSuccess(true);
       setTitle('');
       setAuthor('');
       setGenre('');
@@ -95,133 +111,244 @@ export default function BookRequests() {
       setDuplicate(null);
       fetchRequests();
     } catch (err) {
-      setError(err.response?.data?.error || 'Failed to submit request');
+      setSubmitError(err.response?.data?.error || 'Failed to submit request');
     } finally {
       setSubmitting(false);
     }
   };
 
+  const getStatusBadge = (status) => {
+    const styles = {
+      pending: { background: '#fff3e0', color: '#e65100' },
+      approved: { background: '#e8f5e9', color: '#2e7d32' },
+      rejected: { background: '#ffebee', color: '#c62828' },
+      fulfilled: { background: '#e3f2fd', color: '#1565c0' },
+    };
+    const s = styles[status] || { background: '#f5f5f5', color: '#666' };
+    return (
+      <span style={{
+        display: 'inline-block',
+        padding: '2px 8px',
+        borderRadius: '3px',
+        fontSize: '0.75rem',
+        fontWeight: 'bold',
+        ...s,
+      }}>
+        {status}
+      </span>
+    );
+  };
+
   return (
-    <div style={{ fontFamily: 'DM Sans, sans-serif', padding: 24 }}>
-      <h2 style={{ fontFamily: 'Cormorant Garamond, serif', fontSize: 24, margin: '0 0 16px 0' }}>
+    <div style={{ fontFamily: 'DM Sans, sans-serif' }}>
+      <h2 style={{
+        fontFamily: 'Cormorant Garamond, serif',
+        color: '#2c1810',
+        marginBottom: '1rem',
+      }}>
         Book Requests
       </h2>
 
-      {error && (
-        <div style={{ padding: 8, marginBottom: 12, background: '#fdecea', color: '#c62828', borderRadius: 4, fontSize: 13 }}>
-          {error}
-          <button onClick={() => setError(null)} style={{ marginLeft: 8, background: 'none', border: 'none', cursor: 'pointer', color: '#c62828' }}>x</button>
-        </div>
-      )}
-
-      {/* Request form */}
-      <form onSubmit={handleSubmit} style={{ marginBottom: 24, padding: 16, background: '#fafafa', borderRadius: 8, border: '1px solid #e0d5c7' }}>
-        <h3 style={{ fontFamily: 'Cormorant Garamond, serif', fontSize: 18, margin: '0 0 12px 0' }}>
+      {/* Submit form */}
+      <form onSubmit={handleSubmit} style={{
+        padding: '1.25rem',
+        border: '1px solid #e0d8c8',
+        borderRadius: '8px',
+        marginBottom: '2rem',
+        background: '#f8f6f0',
+      }}>
+        <h3 style={{ fontFamily: 'Cormorant Garamond, serif', color: '#2c1810', margin: '0 0 1rem 0' }}>
           Request a New Book
         </h3>
 
-        {duplicate && duplicate.duplicate && (
-          <div style={{ padding: 8, marginBottom: 12, background: '#fff8e1', color: '#f57f17', borderRadius: 4, fontSize: 12, border: '1px solid #ffecb3' }}>
-            You have already requested this book. Current status: {STATUS_LABELS[duplicate.status] || duplicate.status}
-          </div>
-        )}
-
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
           <div>
-            <label style={{ fontSize: 13, fontWeight: 600, display: 'block', marginBottom: 4 }}>Title *</label>
+            <label style={{ display: 'block', fontSize: '0.85rem', color: '#555', marginBottom: '4px' }}>
+              Title *
+            </label>
             <input
+              type="text"
               value={title}
               onChange={(e) => setTitle(e.target.value)}
               placeholder="Book title"
-              style={{ width: '100%', padding: 8, border: '1px solid #ccc', borderRadius: 4, boxSizing: 'border-box' }}
+              style={{
+                width: '100%',
+                padding: '0.5rem',
+                border: '1px solid #ccc',
+                borderRadius: '4px',
+                fontSize: '0.9rem',
+                boxSizing: 'border-box',
+              }}
             />
           </div>
           <div>
-            <label style={{ fontSize: 13, fontWeight: 600, display: 'block', marginBottom: 4 }}>Author *</label>
+            <label style={{ display: 'block', fontSize: '0.85rem', color: '#555', marginBottom: '4px' }}>
+              Author *
+            </label>
             <input
+              type="text"
               value={author}
               onChange={(e) => setAuthor(e.target.value)}
               placeholder="Author name"
-              style={{ width: '100%', padding: 8, border: '1px solid #ccc', borderRadius: 4, boxSizing: 'border-box' }}
+              style={{
+                width: '100%',
+                padding: '0.5rem',
+                border: '1px solid #ccc',
+                borderRadius: '4px',
+                fontSize: '0.9rem',
+                boxSizing: 'border-box',
+              }}
             />
           </div>
         </div>
 
-        <div style={{ marginBottom: 12 }}>
-          <label style={{ fontSize: 13, fontWeight: 600, display: 'block', marginBottom: 4 }}>Genre *</label>
-          <input
+        <div style={{ marginBottom: '1rem' }}>
+          <label style={{ display: 'block', fontSize: '0.85rem', color: '#555', marginBottom: '4px' }}>
+            Genre *
+          </label>
+          <select
             value={genre}
             onChange={(e) => setGenre(e.target.value)}
-            placeholder="e.g., Fiction, Science, History"
-            style={{ width: '100%', padding: 8, border: '1px solid #ccc', borderRadius: 4, boxSizing: 'border-box' }}
-          />
+            style={{
+              width: '100%',
+              padding: '0.5rem',
+              border: '1px solid #ccc',
+              borderRadius: '4px',
+              fontSize: '0.9rem',
+              boxSizing: 'border-box',
+            }}
+          >
+            <option value="">Select a genre</option>
+            {GENRES.map((g) => (
+              <option key={g} value={g}>{g}</option>
+            ))}
+          </select>
         </div>
 
-        <div style={{ marginBottom: 12 }}>
-          <label style={{ fontSize: 13, fontWeight: 600, display: 'block', marginBottom: 4 }}>Reason (optional)</label>
+        <div style={{ marginBottom: '1rem' }}>
+          <label style={{ display: 'block', fontSize: '0.85rem', color: '#555', marginBottom: '4px' }}>
+            Reason (optional)
+          </label>
           <textarea
             value={reason}
             onChange={(e) => setReason(e.target.value)}
             placeholder="Why would you like this book?"
             rows={2}
-            style={{ width: '100%', padding: 8, border: '1px solid #ccc', borderRadius: 4, resize: 'vertical', fontFamily: 'DM Sans, sans-serif', fontSize: 13, boxSizing: 'border-box' }}
+            style={{
+              width: '100%',
+              padding: '0.5rem',
+              border: '1px solid #ccc',
+              borderRadius: '4px',
+              fontSize: '0.9rem',
+              resize: 'vertical',
+              boxSizing: 'border-box',
+            }}
           />
         </div>
 
-        <button
-          type="submit"
-          disabled={submitting}
-          style={{
-            padding: '8px 20px', background: '#1a1a2e', color: '#fff', border: 'none',
-            borderRadius: 4, cursor: submitting ? 'default' : 'pointer', opacity: submitting ? 0.6 : 1
-          }}
-        >
-          {submitting ? 'Submitting...' : 'Submit Request'}
-        </button>
+        {/* Duplicate warning */}
+        {duplicate && duplicate.duplicate && (
+          <div style={{
+            padding: '0.5rem 0.75rem',
+            background: '#fff3e0',
+            color: '#e65100',
+            borderRadius: '4px',
+            fontSize: '0.85rem',
+            marginBottom: '1rem',
+          }}>
+            Note: A similar request already exists (status: {duplicate.status}).
+          </div>
+        )}
+        {checkingDuplicate && (
+          <div style={{ color: '#999', fontSize: '0.8rem', marginBottom: '0.5rem' }}>
+            Checking for duplicates...
+          </div>
+        )}
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+          <button
+            type="submit"
+            disabled={submitting || !title.trim() || !author.trim() || !genre.trim()}
+            style={{
+              padding: '0.6rem 1.5rem',
+              background: submitting || !title.trim() || !author.trim() || !genre.trim() ? '#999' : '#2c1810',
+              color: '#fff',
+              border: 'none',
+              borderRadius: '4px',
+              cursor: submitting || !title.trim() || !author.trim() || !genre.trim() ? 'not-allowed' : 'pointer',
+              fontSize: '0.9rem',
+            }}
+          >
+            {submitting ? 'Submitting...' : 'Submit Request'}
+          </button>
+          {submitSuccess && (
+            <span style={{ color: '#2e7d32', fontSize: '0.85rem' }}>
+              Request submitted successfully!
+            </span>
+          )}
+        </div>
+
+        {submitError && (
+          <div style={{ color: '#c62828', fontSize: '0.85rem', marginTop: '0.5rem' }}>{submitError}</div>
+        )}
       </form>
 
-      {/* Requests list */}
-      <h3 style={{ fontFamily: 'Cormorant Garamond, serif', fontSize: 18, margin: '0 0 12px 0' }}>
-        My Requests
-      </h3>
+      {/* Request history */}
+      <div>
+        <h3 style={{ fontFamily: 'Cormorant Garamond, serif', color: '#2c1810', marginBottom: '0.75rem' }}>
+          My Requests
+        </h3>
 
-      {loading ? (
-        <div style={{ color: '#666' }}>Loading...</div>
-      ) : requests.length === 0 ? (
-        <div style={{ padding: 40, textAlign: 'center', color: '#999' }}>You haven't made any requests yet.</div>
-      ) : (
-        <div>
-          {requests.map((req) => (
-            <div key={req.id} style={{ padding: 12, marginBottom: 8, background: '#fafafa', borderRadius: 8, border: '1px solid #e0d5c7' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-                <div>
-                  <strong style={{ fontSize: 15 }}>{req.title}</strong>
-                  <span style={{ fontSize: 13, color: '#666', marginLeft: 8 }}>by {req.author}</span>
-                </div>
-                <span style={{
-                  padding: '3px 8px', borderRadius: 4, fontSize: 11, fontWeight: 600,
-                  ...(STATUS_STYLES[req.status] || STATUS_STYLES.pending)
-                }}>
-                  {STATUS_LABELS[req.status] || req.status}
-                </span>
-              </div>
-              <div style={{ display: 'flex', gap: 12, fontSize: 12, color: '#666' }}>
-                <span>Genre: {req.genre}</span>
-                {req.priority === 'urgent' && (
-                  <span style={{ color: '#c62828', fontWeight: 600 }}>Urgent</span>
-                )}
-                <span>{new Date(req.created_at).toLocaleDateString()}</span>
-              </div>
-              {req.reason && (
-                <p style={{ margin: '4px 0 0 0', fontSize: 12, color: '#666' }}>Reason: {req.reason}</p>
-              )}
-              {req.librarian_note && (
-                <p style={{ margin: '4px 0 0 0', fontSize: 12, color: '#c62828' }}>Note: {req.librarian_note}</p>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
+        {loading ? (
+          <div style={{ color: '#666' }}>Loading requests...</div>
+        ) : error ? (
+          <div style={{ padding: '0.75rem', background: '#ffe0e0', color: '#8b0000', borderRadius: '6px' }}>
+            {error}
+          </div>
+        ) : requests.length === 0 ? (
+          <div style={{ textAlign: 'center', color: '#999', padding: '2rem' }}>
+            No requests yet. Use the form above to request a book.
+          </div>
+        ) : (
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem' }}>
+              <thead>
+                <tr style={{ background: '#f5f5f5', borderBottom: '2px solid #e0d8c8' }}>
+                  <th style={{ padding: '0.5rem 0.75rem', textAlign: 'left' }}>Title</th>
+                  <th style={{ padding: '0.5rem 0.75rem', textAlign: 'left' }}>Author</th>
+                  <th style={{ padding: '0.5rem 0.75rem', textAlign: 'left' }}>Genre</th>
+                  <th style={{ padding: '0.5rem 0.75rem', textAlign: 'left' }}>Status</th>
+                  <th style={{ padding: '0.5rem 0.75rem', textAlign: 'left' }}>Priority</th>
+                  <th style={{ padding: '0.5rem 0.75rem', textAlign: 'left' }}>Date</th>
+                </tr>
+              </thead>
+              <tbody>
+                {requests.map((req, idx) => (
+                  <tr key={req.id} style={{
+                    borderBottom: '1px solid #eee',
+                    background: idx % 2 === 0 ? '#fff' : '#fafafa',
+                  }}>
+                    <td style={{ padding: '0.5rem 0.75rem', fontWeight: 500 }}>{req.title}</td>
+                    <td style={{ padding: '0.5rem 0.75rem' }}>{req.author}</td>
+                    <td style={{ padding: '0.5rem 0.75rem' }}>{req.genre}</td>
+                    <td style={{ padding: '0.5rem 0.75rem' }}>{getStatusBadge(req.status)}</td>
+                    <td style={{ padding: '0.5rem 0.75rem' }}>
+                      {req.priority === 'urgent' ? (
+                        <span style={{ color: '#c62828', fontWeight: 'bold', fontSize: '0.8rem' }}>Urgent</span>
+                      ) : (
+                        <span style={{ color: '#666' }}>Normal</span>
+                      )}
+                    </td>
+                    <td style={{ padding: '0.5rem 0.75rem', fontSize: '0.75rem', color: '#666' }}>
+                      {req.created_at ? new Date(req.created_at).toLocaleDateString() : ''}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

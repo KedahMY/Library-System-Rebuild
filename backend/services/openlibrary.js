@@ -1,3 +1,7 @@
+// BiblioVault Open Library service — search, metadata lookup, and
+// Internet Archive PDF download utilities.
+// Exports: searchBooks, findSimilar, downloadIaPdf, scorePdfCandidate, fetchCover
+
 import axios from 'axios';
 import fs from 'fs';
 import path from 'path';
@@ -6,213 +10,217 @@ const OL_SEARCH_URL = 'https://openlibrary.org/search.json';
 const IA_METADATA_URL = 'https://archive.org/metadata';
 const IA_DOWNLOAD_URL = 'https://archive.org/download';
 const OL_COVERS_URL = 'https://covers.openlibrary.org/b/id';
+const TIMEOUT_MS = 15000;
 
 /**
- * Search Open Library for books matching a query.
- * @param {string} query - Search text
- * @param {number} limit - Max results (default 10)
- * @returns {Promise<Array>} Array of { ol_key, title, author, year, cover_id, ia_identifier, isbn }
+ * Searches Open Library for books matching the given query.
+ * @param {string} query - Search query
+ * @param {number} limit - Maximum results (default 10)
+ * @returns {Promise<Array>} Array of { ol_key, title, author, year, cover_id, ia_identifier }
  */
 export async function searchBooks(query, limit = 10) {
-  try {
-    const response = await axios.get(OL_SEARCH_URL, {
-      params: { q: query, limit },
-      timeout: 10000
-    });
+  if (!query || !query.trim()) {
+    throw new Error('Search query is required');
+  }
 
-    return (response.data.docs || []).map(doc => ({
-      ol_key: doc.key,
-      title: doc.title,
-      author: doc.author_name ? doc.author_name[0] : 'Unknown',
+  const url = `${OL_SEARCH_URL}?q=${encodeURIComponent(query.trim())}&limit=${limit}`;
+
+  try {
+    const response = await axios.get(url, { timeout: TIMEOUT_MS });
+
+    if (!response.data || !response.data.docs) {
+      return [];
+    }
+
+    return response.data.docs.map((doc) => ({
+      ol_key: doc.key || null,
+      title: doc.title || 'Unknown Title',
+      author: doc.author_name ? doc.author_name[0] : 'Unknown Author',
       year: doc.first_publish_year || null,
       cover_id: doc.cover_i || null,
       ia_identifier: doc.ia ? doc.ia[0] : null,
-      isbn: doc.isbn ? doc.isbn[0] : null
-    }));
+    })).filter((item) => item.title !== 'Unknown Title');
   } catch (err) {
-    console.error('OpenLibrary search error:', err.message);
+    if (err.code === 'ECONNABORTED') {
+      throw new Error('Open Library search request timed out');
+    }
+    if (err.code === 'ENOTFOUND' || err.code === 'EAI_AGAIN') {
+      throw new Error('Cannot reach Open Library — network is unavailable');
+    }
     throw new Error(`Open Library search failed: ${err.message}`);
   }
 }
 
 /**
- * Find similar books by title and genre.
+ * Finds similar books by searching title + genre.
  * @param {string} title - Book title
  * @param {string} genre - Book genre
- * @param {number} limit - Max results (default 5)
- * @returns {Promise<Array>} Array of book results
+ * @returns {Promise<Array>} Top 5 matches
  */
-export async function findSimilar(title, genre, limit = 5) {
+export async function findSimilar(title, genre) {
   const query = `${title} ${genre || ''}`.trim();
-  try {
-    const results = await searchBooks(query, limit + 1);
-    // Filter out the exact title match, return remaining
-    const filtered = results.filter(r =>
-      r.title.toLowerCase() !== title.toLowerCase()
-    );
-    return filtered.slice(0, limit);
-  } catch (err) {
-    console.error('findSimilar error:', err.message);
-    return [];
-  }
+  const results = await searchBooks(query, 8);
+  return results.slice(0, 5);
 }
 
 /**
- * Score a PDF candidate file for download quality.
- * @param {string} filename - File name
+ * Heuristic scoring for Internet Archive PDF candidates.
+ * Prefers files ending in .pdf, larger files (books not covers),
+ * penalizes files < 10 KB (likely thumbnails).
+ * @param {string} filename - The file name
  * @param {number} size - File size in bytes
- * @returns {number} Score (higher is better)
+ * @returns {number} Numeric score (higher = better candidate)
  */
 export function scorePdfCandidate(filename, size) {
   let score = 0;
 
-  // Prefer files ending in .pdf
-  if (filename.toLowerCase().endsWith('.pdf')) {
-    score += 50;
+  const lower = (filename || '').toLowerCase();
+
+  // Prefer .pdf files
+  if (lower.endsWith('.pdf')) {
+    score += 100;
+  } else {
+    score -= 50; // non-PDF files are less desirable
   }
 
-  // Penalize files smaller than 10 KB (likely not a real book PDF)
+  // Penalize very small files (likely thumbnails or text files, not books)
   if (size < 10240) {
-    score -= 100;
+    score -= 80;
+  } else if (size < 102400) {
+    score -= 20; // Slightly penalize small files (100KB-10KB)
   }
 
-  // Larger files are more likely to be actual book content
-  if (size > 1024 * 1024) {
-    score += 30;
-  }
-  if (size > 10 * 1024 * 1024) {
+  // Reward larger files (books are typically > 1 MB)
+  if (size > 1048576) {
+    score += 50;
+  } else if (size > 524288) {
     score += 20;
   }
 
-  // Penalize files with "texts" or "book" not in name (likely metadata PDFs)
-  const lower = filename.toLowerCase();
-  if (lower.includes('_texts') || lower.includes('_djvu') || lower.includes('_meta')) {
-    score -= 20;
+  // Penalize known non-book patterns
+  if (lower.includes('__ia_thumb') || lower.includes('thumb') || lower.includes('cover')) {
+    score -= 60;
+  }
+
+  // Reward files with "pdf" in name without "text" (text PDFs are usually OCR versions)
+  if (lower.includes('pdf') && !lower.includes('_text')) {
+    score += 10;
   }
 
   return score;
 }
 
 /**
- * Download a PDF from Internet Archive for a given identifier.
- * Uses scorePdfCandidate to select the best PDF file from the item's file list.
+ * Downloads a PDF from Internet Archive given an IA identifier.
+ * Uses scorePdfCandidate heuristic to pick the best PDF file.
+ * Streams the file to destPath.
  * @param {string} iaIdentifier - Internet Archive identifier
- * @param {string} destPath - Absolute destination path for the downloaded PDF
- * @returns {Promise<{success: boolean, path: string, size: number}>}
+ * @param {string} destPath - Absolute path where the file should be saved
+ * @returns {Promise<{ success: boolean, path: string, size: number }>}
  */
 export async function downloadIaPdf(iaIdentifier, destPath) {
-  console.log(`Fetching IA metadata for identifier: ${iaIdentifier}`);
+  if (!iaIdentifier || !iaIdentifier.trim()) {
+    throw new Error('Internet Archive identifier is required');
+  }
 
-  // Get item metadata to find available files
-  let metadataResponse;
+  // Step 1: Fetch the item metadata to find available files
+  let metadata;
   try {
-    metadataResponse = await axios.get(`${IA_METADATA_URL}/${iaIdentifier}`, {
-      timeout: 15000
-    });
+    const metaUrl = `${IA_METADATA_URL}/${encodeURIComponent(iaIdentifier.trim())}`;
+    const metaResponse = await axios.get(metaUrl, { timeout: TIMEOUT_MS });
+    metadata = metaResponse.data;
   } catch (err) {
-    console.error('IA metadata fetch error:', err.message);
-    throw new Error(`Failed to fetch IA metadata: ${err.message}`);
+    if (err.response && err.response.status === 404) {
+      throw new Error(`Internet Archive item "${iaIdentifier}" not found`);
+    }
+    throw new Error(`Failed to fetch Internet Archive metadata: ${err.message}`);
   }
 
-  const files = metadataResponse.data.files || [];
-
-  if (files.length === 0) {
-    throw new Error(`No files found for IA identifier: ${iaIdentifier}`);
-  }
-
-  // Score and sort PDF candidates
+  // Step 2: Find PDF files in the item's file list
+  const files = metadata.files || [];
   const candidates = files
-    .filter(f => f.name && f.name.toLowerCase().endsWith('.pdf'))
-    .map(f => ({
+    .filter((f) => f.name && f.name.toLowerCase().endsWith('.pdf'))
+    .map((f) => ({
       name: f.name,
-      size: parseInt(f.size) || 0,
-      score: scorePdfCandidate(f.name, parseInt(f.size) || 0)
+      size: f.size || 0,
+      score: scorePdfCandidate(f.name, f.size || 0),
     }))
     .sort((a, b) => b.score - a.score);
 
   if (candidates.length === 0) {
-    throw new Error(`No suitable PDF found for identifier: ${iaIdentifier}`);
+    throw new Error(`No PDF files found for Internet Archive item "${iaIdentifier}"`);
   }
 
-  const best = candidates[0];
-  const pdfUrl = `${IA_DOWNLOAD_URL}/${iaIdentifier}/${best.name}`;
+  // Step 3: Try candidates from highest to lowest score
+  let lastError = null;
+  for (const candidate of candidates) {
+    const url = `${IA_DOWNLOAD_URL}/${encodeURIComponent(iaIdentifier.trim())}/${encodeURIComponent(candidate.name)}`;
 
-  console.log(`Downloading IA PDF: ${pdfUrl}`);
-  console.log(`  Size: ${(best.size / 1024 / 1024).toFixed(1)} MB, Score: ${best.score}`);
+    try {
+      const writer = fs.createWriteStream(destPath);
+      const response = await axios({
+        method: 'get',
+        url,
+        responseType: 'stream',
+        timeout: TIMEOUT_MS * 2,
+      });
 
-  // Download the PDF
-  let downloadResponse;
-  try {
-    downloadResponse = await axios({
-      method: 'GET',
-      url: pdfUrl,
-      responseType: 'stream',
-      timeout: 180000,
-      maxRedirects: 5
-    });
-  } catch (err) {
-    console.error('IA PDF download error:', err.message);
-    throw new Error(`Failed to download PDF: ${err.message}`);
-  }
+      await new Promise((resolve, reject) => {
+        response.data.pipe(writer);
+        writer.on('finish', resolve);
+        writer.on('error', reject);
+      });
 
-  const writer = fs.createWriteStream(destPath);
+      const stats = fs.statSync(destPath);
+      if (stats.size === 0) {
+        fs.unlinkSync(destPath);
+        lastError = new Error('Downloaded file is empty (0 bytes)');
+        continue;
+      }
 
-  return new Promise((resolve, reject) => {
-    let downloadedSize = 0;
+      console.log(`Downloaded "${candidate.name}" from IA (${stats.size} bytes)`);
 
-    downloadResponse.data.on('data', (chunk) => {
-      downloadedSize += chunk.length;
-    });
-
-    downloadResponse.data.pipe(writer);
-
-    writer.on('finish', () => {
-      console.log(`IA PDF download complete: ${destPath} (${downloadedSize} bytes)`);
-      resolve({
+      return {
         success: true,
         path: destPath,
-        size: downloadedSize
-      });
-    });
+        size: stats.size,
+      };
+    } catch (err) {
+      lastError = err;
+      console.log(`Failed to download candidate "${candidate.name}": ${err.message}`);
+      // Clean up partial download if it exists
+      if (fs.existsSync(destPath)) {
+        try { fs.unlinkSync(destPath); } catch (e) { /* ignore */ }
+      }
+      continue;
+    }
+  }
 
-    writer.on('error', (err) => {
-      console.error('IA PDF write error:', err.message);
-      // Clean up partial file
-      try { fs.unlinkSync(destPath); } catch (e) { /* ignore */ }
-      reject(new Error(`Failed to save PDF: ${err.message}`));
-    });
-
-    downloadResponse.data.on('error', (err) => {
-      console.error('IA PDF stream error:', err.message);
-      writer.destroy();
-      try { fs.unlinkSync(destPath); } catch (e) { /* ignore */ }
-      reject(new Error(`Failed to download PDF: ${err.message}`));
-    });
-  });
+  throw lastError || new Error(`Failed to download any PDF from Internet Archive item "${iaIdentifier}"`);
 }
 
 /**
- * Fetch a cover image from Open Library covers API.
- * @param {number|string} coverId - Cover ID from OL search
+ * Fetches a cover image from Open Library by cover ID.
+ * @param {number} coverId - Open Library cover ID
  * @param {'S'|'M'|'L'} size - Size: S (small), M (medium), L (large)
- * @returns {Promise<Buffer|null>} Image buffer or null on failure
+ * @returns {Promise<Buffer|null>} Image buffer, or null on failure
  */
 export async function fetchCover(coverId, size = 'M') {
   if (!coverId) return null;
 
-  const url = `${OL_COVERS_URL}/${coverId}-${size}.jpg`;
+  const validSizes = ['S', 'M', 'L'];
+  const imgSize = validSizes.includes(size) ? size : 'M';
+
+  const url = `${OL_COVERS_URL}/${coverId}-${imgSize}.jpg`;
 
   try {
-    const response = await axios({
-      method: 'GET',
-      url,
+    const response = await axios.get(url, {
       responseType: 'arraybuffer',
-      timeout: 10000
+      timeout: TIMEOUT_MS,
     });
-
     return Buffer.from(response.data);
   } catch (err) {
-    console.error(`fetchCover error for cover ${coverId}:`, err.message);
+    console.error(`Failed to fetch cover ${coverId}: ${err.message}`);
     return null;
   }
 }

@@ -1,0 +1,4 @@
+- generic [ref=e4]:
+  - generic [ref=e5]: ✅
+  - heading "Registration Successful!" [level=2] [ref=e49]
+  - paragraph [ref=e50]: Redirecting to login page...

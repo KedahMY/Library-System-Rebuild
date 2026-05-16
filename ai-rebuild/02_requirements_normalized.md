@@ -1,5 +1,7 @@
 # 02 · Normalized Requirements
 
+> **STATUS: SUPPORTING.** Provides stable `P{n}-T{n}-AREA-nnn` IDs referenced by `08_traceability_matrix.md`. The canonical rubric text lives in [`16_full_requirements_verbatim.md`](16_full_requirements_verbatim.md), and the binding acceptance criteria are in [`17_acceptance_checklist.md`](17_acceptance_checklist.md). If anything below conflicts with 16, file 16 wins.
+
 > Every requirement has a stable ID: `P{phase}-T{task}-{AREA}-{nnn}`. The traceability matrix ([`08_traceability_matrix.md`](08_traceability_matrix.md)) maps each ID to code locations, screens, and tests.
 >
 > **MoSCoW**: `MUST` = required for SC pass · `SHOULD` = required for full credit · `COULD` = nice-to-have, implement after MUSTs · `WON'T` = explicitly out of scope.

@@ -1,50 +1,52 @@
+// BiblioVault StarRating component — clickable 5-star rating widget.
+// Props: { value, onChange, readOnly? }
+
 import React from 'react';
 
-const STAR_SIZE = 24;
+const starStyle = {
+  cursor: 'pointer',
+  fontSize: '1.5rem',
+  color: '#c9a84c',
+  transition: 'color 0.15s ease',
+  background: 'none',
+  border: 'none',
+  padding: '2px',
+};
 
-export default function StarRating({ value, onChange, readOnly }) {
-  const stars = [1, 2, 3, 4, 5];
-
+export default function StarRating({ value = 0, onChange, readOnly = false }) {
   const handleClick = (rating) => {
     if (!readOnly && onChange) {
       onChange(rating);
     }
   };
 
-  const starStyle = {
-    cursor: readOnly ? 'default' : 'pointer',
-    fontSize: STAR_SIZE,
-    color: '#d4a017',
-    transition: 'color 0.15s'
-  };
-
   return (
-    <div style={{ display: 'inline-flex', gap: 2, alignItems: 'center' }}>
-      {stars.map((star) => (
-        <span
+    <span style={{ display: 'inline-flex', gap: '2px', alignItems: 'center' }}>
+      {[1, 2, 3, 4, 5].map((star) => (
+        <button
           key={star}
-          onClick={() => handleClick(star)}
+          type="button"
           style={{
             ...starStyle,
-            opacity: star <= value ? 1 : 0.25
+            cursor: readOnly ? 'default' : 'pointer',
+            opacity: star <= value ? 1 : 0.3,
           }}
+          onClick={() => handleClick(star)}
           onMouseEnter={(e) => {
-            if (!readOnly) e.target.style.opacity = '1';
+            if (!readOnly) {
+              e.currentTarget.style.transform = 'scale(1.2)';
+            }
           }}
           onMouseLeave={(e) => {
-            if (!readOnly) e.target.style.opacity = star <= value ? 1 : 0.25;
+            e.currentTarget.style.transform = 'scale(1)';
           }}
-          role={readOnly ? 'img' : 'button'}
-          aria-label={`${star} star${star !== 1 ? 's' : ''}`}
+          disabled={readOnly}
+          aria-label={`${star} star${star > 1 ? 's' : ''}`}
+          title={`${star} star${star > 1 ? 's' : ''}`}
         >
           {star <= value ? '★' : '☆'}
-        </span>
+        </button>
       ))}
-      {value > 0 && (
-        <span style={{ marginLeft: 6, fontSize: 13, color: '#666' }}>
-          {value}/5
-        </span>
-      )}
-    </div>
+    </span>
   );
 }

@@ -1,0 +1,16 @@
+{
+  "subagent": "M10-Audit",
+  "total_requirements": 182,
+  "passed": 180,
+  "failed": 1,
+  "pending": 1,
+  "missing_req_ids": ["REQ-069"],
+  "log_path": "ai-rebuild/test-pack/results/requirement_audit.log",
+  "failures_path": "ai-rebuild/notes/audit_failures.md",
+  "status": "FAILURES_FOUND",
+  "summary": "180/182 PASS. 1 FAIL (REQ-069): Crash Test button not visible in sidebar due to stale frontend bundle. 1 PENDING (REQ-071): requires backend restart. REBUILD NOT ACCEPTED.",
+  "failures_by_owner": {
+    "SA-8": ["REQ-069"],
+    "SA-7+SA-8": ["REQ-071"]
+  }
+}

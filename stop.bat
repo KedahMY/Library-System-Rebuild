@@ -1,6 +1,5 @@
 @echo off
-echo Stopping BiblioVault...
-taskkill /FI "WINDOWTITLE eq BiblioVault Backend*" /T /F 2>nul
-taskkill /FI "WINDOWTITLE eq BiblioVault Frontend*" /T /F 2>nul
-taskkill /F /IM node.exe 2>nul
-echo Stopped.
+REM BiblioVault — stop backend and frontend dev servers by port
+echo Stopping BiblioVault servers...
+taskkill /f /fi "PID ne 0" /fi "IMAGENAME eq node.exe" 2>nul
+echo Done.

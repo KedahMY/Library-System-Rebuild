@@ -1,80 +1,86 @@
+// BiblioVault ReviewSection component — displays reviews for a book and
+// allows the current user to submit a new review (if they have borrowed it).
+// Props: { bookId, currentUserId }
+
 import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
-import StarRating from './StarRating';
+import StarRating from './StarRating.jsx';
 
-const API = axios.create({ baseURL: '/api' });
+const API_BASE = '';
 
-export default function ReviewSection({ bookId }) {
+function getToken() {
+  return localStorage.getItem('token') || '';
+}
+
+function getAuthHeaders() {
+  return { Authorization: `Bearer ${getToken()}` };
+}
+
+export default function ReviewSection({ bookId, currentUserId }) {
   const [reviews, setReviews] = useState([]);
-  const [aggregate, setAggregate] = useState(null);
+  const [avgRating, setAvgRating] = useState(0);
+  const [reviewCount, setReviewCount] = useState(0);
+  const [distribution, setDistribution] = useState({ 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [rating, setRating] = useState(0);
-  const [content, setContent] = useState('');
+
+  // New review form
+  const [newRating, setNewRating] = useState(0);
+  const [newContent, setNewContent] = useState('');
   const [anonymous, setAnonymous] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [hasReviewed, setHasReviewed] = useState(false);
+  const [submitError, setSubmitError] = useState(null);
+  const [submitSuccess, setSubmitSuccess] = useState(false);
+
+  // Sort option
+  const [sort, setSort] = useState('recent');
 
   const fetchReviews = useCallback(async () => {
+    if (!bookId) return;
+    setLoading(true);
+    setError(null);
     try {
-      setLoading(true);
-      const res = await API.get(`/reviews/book/${bookId}/with-replies`);
+      const res = await axios.get(`${API_BASE}/api/reviews/book/${bookId}?sort=${sort}`, {
+        headers: getAuthHeaders(),
+      });
       setReviews(res.data.reviews || []);
-      setAggregate(res.data.aggregate);
+      setAvgRating(res.data.avg_rating || 0);
+      setReviewCount(res.data.review_count || 0);
+      setDistribution(res.data.distribution || { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 });
     } catch (err) {
       setError(err.response?.data?.error || 'Failed to load reviews');
     } finally {
       setLoading(false);
     }
-  }, [bookId]);
+  }, [bookId, sort]);
 
   useEffect(() => {
     fetchReviews();
   }, [fetchReviews]);
 
-  // Check if user has already reviewed
-  useEffect(() => {
-    const token = localStorage.getItem('token');
-    if (!token || !reviews.length) return;
-
-    const payload = JSON.parse(atob(token.split('.')[1]));
-    const userReview = reviews.find(r => r.user_id === payload.id);
-    if (userReview) {
-      setHasReviewed(true);
-    }
-  }, [reviews]);
-
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (rating === 0) {
-      setError('Please select a rating');
+    if (newRating === 0) {
+      setSubmitError('Please select a rating');
       return;
     }
+    setSubmitting(true);
+    setSubmitError(null);
+    setSubmitSuccess(false);
 
     try {
-      setSubmitting(true);
-      await API.post('/reviews', {
-        book_id: bookId,
-        rating,
-        content: content.trim() || null,
-        anonymous: anonymous ? 1 : 0
-      }, {
-        headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
-      });
-      setRating(0);
-      setContent('');
+      await axios.post(
+        `${API_BASE}/api/reviews`,
+        { book_id: bookId, rating: newRating, content: newContent, anonymous },
+        { headers: getAuthHeaders() }
+      );
+      setSubmitSuccess(true);
+      setNewRating(0);
+      setNewContent('');
       setAnonymous(false);
-      setHasReviewed(true);
       fetchReviews();
     } catch (err) {
-      if (err.response?.status === 403) {
-        setError('You can only review books you have borrowed');
-      } else if (err.response?.status === 409) {
-        setError('You have already reviewed this book');
-        setHasReviewed(true);
-      } else {
-        setError(err.response?.data?.error || 'Failed to submit review');
-      }
+      setSubmitError(err.response?.data?.error || 'Failed to submit review');
     } finally {
       setSubmitting(false);
     }
@@ -82,9 +88,11 @@ export default function ReviewSection({ bookId }) {
 
   const handleHelpful = async (reviewId) => {
     try {
-      await API.post(`/reviews/${reviewId}/helpful`, {}, {
-        headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
-      });
+      await axios.post(
+        `${API_BASE}/api/reviews/${reviewId}/helpful`,
+        {},
+        { headers: getAuthHeaders() }
+      );
       fetchReviews();
     } catch (err) {
       console.error('Failed to mark helpful:', err);
@@ -92,145 +100,233 @@ export default function ReviewSection({ bookId }) {
   };
 
   if (loading) {
-    return <div style={{ padding: 16, color: '#666' }}>Loading reviews...</div>;
+    return <div style={{ padding: '1rem', color: '#666' }}>Loading reviews...</div>;
   }
-
-  const getSentimentLabel = (sentiment) => {
-    if (!sentiment) return null;
-    const labels = { positive: 'Positive', negative: 'Negative', neutral: 'Neutral' };
-    return labels[sentiment] || null;
-  };
-
-  const getSentimentColor = (sentiment) => {
-    const colors = { positive: '#2e7d32', negative: '#c62828', neutral: '#666' };
-    return colors[sentiment] || '#666';
-  };
 
   return (
     <div style={{ fontFamily: 'DM Sans, sans-serif' }}>
-      <h3 style={{ fontFamily: 'Cormorant Garamond, serif', fontSize: 20, margin: '0 0 8px 0' }}>
-        Reviews
-      </h3>
-
-      {aggregate && (
-        <div style={{ display: 'flex', gap: 16, alignItems: 'center', marginBottom: 16, padding: 12, background: '#f5f0eb', borderRadius: 8 }}>
-          <div style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: 28, fontWeight: 700, color: '#1a1a2e' }}>{aggregate.avg_rating.toFixed(1)}</div>
-            <StarRating value={Math.round(aggregate.avg_rating)} readOnly />
-            <div style={{ fontSize: 12, color: '#666' }}>{aggregate.count} review{aggregate.count !== 1 ? 's' : ''}</div>
+      {/* Summary stats */}
+      <div style={{
+        display: 'flex',
+        gap: '2rem',
+        alignItems: 'center',
+        marginBottom: '1.5rem',
+        padding: '1rem',
+        background: '#f8f6f0',
+        borderRadius: '8px',
+        flexWrap: 'wrap',
+      }}>
+        <div style={{ textAlign: 'center' }}>
+          <div style={{ fontSize: '2rem', fontWeight: 'bold', color: '#c9a84c' }}>
+            {avgRating.toFixed(1)}
           </div>
-          <div style={{ flex: 1 }}>
-            {[5, 4, 3, 2, 1].map(star => {
-              const count = aggregate.distribution[star] || 0;
-              const pct = aggregate.count > 0 ? (count / aggregate.count) * 100 : 0;
-              return (
-                <div key={star} style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 2 }}>
-                  <span style={{ fontSize: 12, width: 20 }}>{star}</span>
-                  <div style={{ flex: 1, height: 8, background: '#ddd', borderRadius: 4 }}>
-                    <div style={{ width: `${pct}%`, height: 8, background: '#d4a017', borderRadius: 4 }} />
-                  </div>
-                  <span style={{ fontSize: 11, color: '#666', width: 24, textAlign: 'right' }}>{count}</span>
+          <StarRating value={Math.round(avgRating)} readOnly />
+          <div style={{ fontSize: '0.85rem', color: '#666', marginTop: '4px' }}>
+            {reviewCount} review{reviewCount !== 1 ? 's' : ''}
+          </div>
+        </div>
+        <div>
+          {[5, 4, 3, 2, 1].map((star) => {
+            const total = Object.values(distribution).reduce((a, b) => a + b, 0) || 1;
+            const pct = total > 0 ? ((distribution[star] || 0) / total) * 100 : 0;
+            return (
+              <div key={star} style={{ display: 'flex', alignItems: 'center', gap: '6px', margin: '2px 0' }}>
+                <span style={{ fontSize: '0.8rem', width: '30px' }}>{star} star</span>
+                <div style={{
+                  width: '100px',
+                  height: '8px',
+                  background: '#ddd',
+                  borderRadius: '4px',
+                  overflow: 'hidden',
+                }}>
+                  <div style={{
+                    width: `${pct}%`,
+                    height: '100%',
+                    background: '#c9a84c',
+                    borderRadius: '4px',
+                  }} />
                 </div>
-              );
-            })}
-          </div>
+                <span style={{ fontSize: '0.75rem', color: '#666', width: '20px' }}>
+                  {distribution[star] || 0}
+                </span>
+              </div>
+            );
+          })}
         </div>
-      )}
+      </div>
 
+      {/* Error state */}
       {error && (
-        <div style={{ padding: 8, marginBottom: 12, background: '#fdecea', color: '#c62828', borderRadius: 4, fontSize: 13 }}>
+        <div style={{
+          padding: '0.75rem',
+          background: '#ffe0e0',
+          color: '#8b0000',
+          borderRadius: '6px',
+          marginBottom: '1rem',
+        }}>
           {error}
-          <button onClick={() => setError(null)} style={{ marginLeft: 8, background: 'none', border: 'none', cursor: 'pointer', color: '#c62828' }}>x</button>
         </div>
       )}
 
-      {/* Review form */}
-      {!hasReviewed && (
-        <form onSubmit={handleSubmit} style={{ marginBottom: 20, padding: 16, background: '#fafafa', borderRadius: 8, border: '1px solid #e0d5c7' }}>
-          <h4 style={{ margin: '0 0 8px 0', fontSize: 15 }}>Write a Review</h4>
-          <div style={{ marginBottom: 8 }}>
-            <StarRating value={rating} onChange={setRating} />
+      {/* Submit review form */}
+      {currentUserId && (
+        <form onSubmit={handleSubmit} style={{
+          marginBottom: '1.5rem',
+          padding: '1rem',
+          border: '1px solid #e0d8c8',
+          borderRadius: '8px',
+        }}>
+          <h4 style={{ margin: '0 0 0.75rem 0', fontFamily: 'Cormorant Garamond, serif', color: '#2c1810' }}>
+            Write a Review
+          </h4>
+          <div style={{ marginBottom: '0.75rem' }}>
+            <StarRating value={newRating} onChange={setNewRating} />
           </div>
           <textarea
-            value={content}
-            onChange={(e) => setContent(e.target.value)}
+            value={newContent}
+            onChange={(e) => setNewContent(e.target.value)}
             placeholder="Share your thoughts about this book..."
             rows={3}
-            style={{ width: '100%', padding: 8, border: '1px solid #ccc', borderRadius: 4, resize: 'vertical', fontFamily: 'DM Sans, sans-serif', fontSize: 13, boxSizing: 'border-box' }}
+            style={{
+              width: '100%',
+              padding: '0.5rem',
+              border: '1px solid #ccc',
+              borderRadius: '4px',
+              fontFamily: 'DM Sans, sans-serif',
+              fontSize: '0.9rem',
+              resize: 'vertical',
+              boxSizing: 'border-box',
+            }}
           />
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 8 }}>
-            <label style={{ fontSize: 13, display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
-              <input type="checkbox" checked={anonymous} onChange={(e) => setAnonymous(e.target.checked)} />
+          <div style={{ marginTop: '0.5rem', display: 'flex', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.85rem', cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={anonymous}
+                onChange={(e) => setAnonymous(e.target.checked)}
+              />
               Post anonymously
             </label>
             <button
               type="submit"
-              disabled={submitting}
+              disabled={submitting || newRating === 0}
               style={{
-                padding: '6px 16px', background: '#1a1a2e', color: '#fff', border: 'none',
-                borderRadius: 4, cursor: submitting ? 'default' : 'pointer', opacity: submitting ? 0.6 : 1
+                padding: '0.5rem 1.25rem',
+                background: submitting ? '#999' : '#2c1810',
+                color: '#fff',
+                border: 'none',
+                borderRadius: '4px',
+                cursor: submitting ? 'not-allowed' : 'pointer',
+                fontFamily: 'DM Sans, sans-serif',
+                marginLeft: 'auto',
               }}
             >
               {submitting ? 'Submitting...' : 'Submit Review'}
             </button>
           </div>
+          {submitError && (
+            <div style={{ color: '#8b0000', fontSize: '0.85rem', marginTop: '0.5rem' }}>{submitError}</div>
+          )}
+          {submitSuccess && (
+            <div style={{ color: '#2e7d32', fontSize: '0.85rem', marginTop: '0.5rem' }}>Review submitted successfully!</div>
+          )}
         </form>
       )}
 
+      {/* Sort controls */}
+      {reviews.length > 0 && (
+        <div style={{ marginBottom: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+          <span style={{ fontSize: '0.85rem', color: '#666' }}>Sort by:</span>
+          <select
+            value={sort}
+            onChange={(e) => setSort(e.target.value)}
+            style={{
+              padding: '0.25rem 0.5rem',
+              border: '1px solid #ccc',
+              borderRadius: '4px',
+              fontSize: '0.85rem',
+            }}
+          >
+            <option value="recent">Most Recent</option>
+            <option value="helpful">Most Helpful</option>
+          </select>
+        </div>
+      )}
+
       {/* Reviews list */}
-      {reviews.length === 0 && !loading && (
-        <div style={{ padding: 16, textAlign: 'center', color: '#999', fontSize: 14 }}>
+      {reviews.length === 0 && !loading && !error && (
+        <div style={{ textAlign: 'center', color: '#999', padding: '2rem' }}>
           No reviews yet. Be the first to review this book!
         </div>
       )}
 
       {reviews.map((review) => (
-        <div key={review.id} style={{ marginBottom: 12, padding: 12, background: '#fff', borderRadius: 8, border: '1px solid #e0d5c7' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <strong style={{ fontSize: 14 }}>{review.username}</strong>
-              <StarRating value={review.rating} readOnly />
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div key={review.id} style={{
+          padding: '1rem',
+          borderBottom: '1px solid #eee',
+          marginBottom: '0.5rem',
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <strong style={{ fontSize: '0.9rem', color: '#2c1810' }}>{review.full_name || review.username}</strong>
               {review.sentiment && (
-                <span style={{ fontSize: 11, padding: '2px 6px', borderRadius: 4, background: getSentimentColor(review.sentiment) + '20', color: getSentimentColor(review.sentiment), fontWeight: 600 }}>
-                  {getSentimentLabel(review.sentiment)}
+                <span style={{
+                  fontSize: '0.7rem',
+                  padding: '2px 6px',
+                  borderRadius: '3px',
+                  background: review.sentiment === 'positive' ? '#e8f5e9' :
+                    review.sentiment === 'negative' ? '#ffebee' : '#f5f5f5',
+                  color: review.sentiment === 'positive' ? '#2e7d32' :
+                    review.sentiment === 'negative' ? '#c62828' : '#666',
+                }}>
+                  {review.sentiment}
                 </span>
               )}
-              <span style={{ fontSize: 11, color: '#999' }}>
-                {new Date(review.created_at).toLocaleDateString()}
-              </span>
             </div>
+            <span style={{ fontSize: '0.75rem', color: '#999' }}>
+              {review.created_at ? new Date(review.created_at).toLocaleDateString() : ''}
+            </span>
+          </div>
+          <div style={{ marginBottom: '4px' }}>
+            <StarRating value={review.rating} readOnly />
           </div>
           {review.content && (
-            <p style={{ margin: '4px 0', fontSize: 13, lineHeight: 1.5 }}>{review.content}</p>
+            <p style={{ margin: '0.5rem 0', fontSize: '0.9rem', color: '#444', lineHeight: 1.5 }}>
+              {review.content}
+            </p>
           )}
-          <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginTop: '0.5rem' }}>
             <button
               onClick={() => handleHelpful(review.id)}
-              style={{ fontSize: 12, background: 'none', border: '1px solid #ddd', borderRadius: 4, padding: '2px 8px', cursor: 'pointer' }}
+              style={{
+                background: 'none',
+                border: '1px solid #ddd',
+                borderRadius: '4px',
+                padding: '2px 8px',
+                fontSize: '0.8rem',
+                cursor: 'pointer',
+                color: '#666',
+              }}
+              title="Mark as helpful"
             >
-              Helpful ({review.helpful_count})
+              Helpful ({review.helpful_count || 0})
             </button>
-          </div>
-
-          {/* Author replies */}
-          {review.replies && review.replies.length > 0 && (
-            <div style={{ marginTop: 8, paddingLeft: 16, borderLeft: '2px solid #d4a017' }}>
-              {review.replies.map((reply) => (
-                <div key={reply.id} style={{ marginBottom: 6 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <strong style={{ fontSize: 12, color: '#1a1a2e' }}>{reply.full_name}</strong>
-                    <span style={{ fontSize: 10, color: '#999' }}>
-                      {new Date(reply.created_at).toLocaleDateString()}
-                    </span>
-                    <span style={{ fontSize: 10, color: '#d4a017', fontWeight: 600 }}>Author</span>
-                  </div>
-                  <p style={{ margin: '2px 0', fontSize: 13 }}>{reply.content}</p>
+            {review.reply && (
+              <div style={{
+                marginTop: '0.5rem',
+                padding: '0.75rem',
+                background: '#f8f6f0',
+                borderLeft: '3px solid #c9a84c',
+                borderRadius: '4px',
+                width: '100%',
+              }}>
+                <div style={{ fontSize: '0.8rem', color: '#2c1810', fontWeight: 'bold', marginBottom: '4px' }}>
+                  Author Reply
                 </div>
-              ))}
-            </div>
-          )}
+                <p style={{ margin: 0, fontSize: '0.85rem', color: '#555' }}>{review.reply.content}</p>
+              </div>
+            )}
+          </div>
         </div>
       ))}
     </div>
