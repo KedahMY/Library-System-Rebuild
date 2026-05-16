@@ -1,0 +1,56 @@
+- generic [ref=e2]:
+  - generic [ref=e17] [cursor=pointer]: Session recovered after unexpected crash
+  - generic [ref=e18]:
+    - complementary [ref=e19]:
+      - heading "BiblioVault" [level=3] [ref=e21]
+      - generic [ref=e22]:
+        - generic [ref=e23]: S
+        - generic [ref=e24]:
+          - generic [ref=e25]: Student Demo
+          - generic [ref=e26]: student
+      - navigation [ref=e27]:
+        - button "📚 Browse" [ref=e28] [cursor=pointer]:
+          - generic [ref=e29]: 📚
+          - generic [ref=e30]: Browse
+        - button "⭐ Recommendations" [ref=e31] [cursor=pointer]:
+          - generic [ref=e32]: ⭐
+          - generic [ref=e33]: Recommendations
+        - button "📖 My Books" [ref=e34] [cursor=pointer]:
+          - generic [ref=e35]: 📖
+          - generic [ref=e36]: My Books
+        - button "🕐 History" [ref=e37] [cursor=pointer]:
+          - generic [ref=e38]: 🕐
+          - generic [ref=e39]: History
+        - button "📋 Requests" [ref=e40] [cursor=pointer]:
+          - generic [ref=e41]: 📋
+          - generic [ref=e42]: Requests
+        - button "🔔 Notifications" [ref=e43] [cursor=pointer]:
+          - generic [ref=e44]: 🔔
+          - generic [ref=e45]: Notifications
+        - button "👤 Profile" [ref=e46] [cursor=pointer]:
+          - generic [ref=e47]: 👤
+          - generic [ref=e48]: Profile
+      - generic [ref=e49]:
+        - button "🚪 Logout" [ref=e50] [cursor=pointer]:
+          - generic [ref=e51]: 🚪
+          - generic [ref=e52]: Logout
+        - generic [ref=e53]:
+          - button "Crash Test" [ref=e55] [cursor=pointer]
+          - button "Crash (No Recovery)" [ref=e57] [cursor=pointer]
+    - main [ref=e58]:
+      - generic [ref=e59]:
+        - heading "Browse Books" [level=2] [ref=e60]
+        - generic [ref=e61]:
+          - searchbox "Search by title, author, or ISBN..." [ref=e62]
+          - combobox [ref=e63]:
+            - option "All Genres" [selected]
+            - option "Fiction"
+            - option "Non-Fiction"
+            - option "Science"
+            - option "History"
+            - option "Technology"
+          - generic [ref=e64]:
+            - checkbox "Available only" [ref=e65]
+            - text: Available only
+          - textbox "Filter by publication date" [ref=e66]
+        - generic [ref=e67]: Book browsing grid will appear here (SA-8 / M7).

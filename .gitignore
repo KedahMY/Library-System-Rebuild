@@ -1,0 +1,27 @@
+# environment
+backend/.env
+backend/.env.*
+!backend/.env.example
+
+# runtime state
+backend/data/library.db
+backend/data/library.db-shm
+backend/data/library.db-wal
+
+# uploads (keep dir, ignore content)
+backend/uploads/books/*
+backend/uploads/covers/*
+backend/uploads/avatars/*
+!backend/uploads/books/.gitkeep
+!backend/uploads/covers/.gitkeep
+!backend/uploads/avatars/.gitkeep
+
+# node + build
+node_modules/
+frontend/dist/
+
+# editor / OS
+.DS_Store
+*.log
+.idea/
+.vscode/

@@ -1,0 +1,2 @@
+## M0 Decisions
+- **server.js database import**: SA-1 used dynamic `await import('./database.js')` instead of static `import { initializeDatabase } from './database.js'` because Node ESM does not allow try/catch around static imports that fail to resolve. Server boots gracefully without `database.js` and `/api/health` + `/api/shutdown` both work. When M1 creates `database.js`, the dynamic import succeeds automatically.
